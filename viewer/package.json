@@ -1,0 +1,29 @@
+{
+  "name": "gargantua-interactive-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18.19"
+  },
+  "scripts": {
+    "renderer:configure": "cmake -S .. -B ../build -DCMAKE_CUDA_ARCHITECTURES=120",
+    "renderer:build": "cmake --build ../build -j",
+    "renderer:rebuild": "npm run renderer:configure && npm run renderer:build",
+    "dev": "concurrently -k -n api,web -c cyan,yellow \"npm:api\" \"npm:web\"",
+    "api": "node server/render-server.mjs",
+    "web": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "serve": "npm run build && node server/render-server.mjs"
+  },
+  "dependencies": {
+    "three": "0.167.1"
+  },
+  "devDependencies": {
+    "@types/node": "18.19.123",
+    "@types/three": "0.167.2",
+    "concurrently": "8.2.2",
+    "typescript": "5.6.3",
+    "vite": "6.4.2"
+  }
+}

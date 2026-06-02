@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gargantua Interactive Map</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="control-rail" aria-label="Simulation controls">
+        <header class="brand-block">
+          <span class="eyebrow">Gargantua</span>
+          <h1>Interactive Map</h1>
+        </header>
+
+        <nav class="preset-strip" id="presetStrip" aria-label="View presets"></nav>
+
+        <section class="control-section">
+          <h2>Camera</h2>
+          <div class="control-stack" id="cameraControls"></div>
+        </section>
+
+        <section class="control-section">
+          <h2>Black Hole</h2>
+          <div class="control-stack" id="physicsControls"></div>
+        </section>
+
+        <section class="control-section">
+          <h2>Disk</h2>
+          <div class="control-stack" id="diskControls"></div>
+        </section>
+
+        <section class="control-section">
+          <h2>Render</h2>
+          <div class="control-stack" id="renderControls"></div>
+          <label class="toggle-row">
+            <input id="thinDisk" type="checkbox" />
+            <span>Thin disk</span>
+          </label>
+          <label class="toggle-row">
+            <input id="noDoppler" type="checkbox" />
+            <span>No Doppler</span>
+          </label>
+          <label class="toggle-row">
+            <input id="autoPreview" type="checkbox" />
+            <span>Auto preview</span>
+          </label>
+        </section>
+      </aside>
+
+      <main class="viewport-shell">
+        <canvas id="sceneCanvas" aria-label="Interactive black hole map"></canvas>
+        <div class="viewport-hud">
+          <span class="status-pill" id="healthStatus">Checking renderer</span>
+          <span class="camera-readout" id="cameraReadout">r 60.0 / theta 84.0 / phi 0.0</span>
+        </div>
+      </main>
+
+      <aside class="render-rail" aria-label="Accurate render output">
+        <header class="render-header">
+          <div>
+            <span class="eyebrow">CUDA Output</span>
+            <h2>Accurate Frame</h2>
+          </div>
+          <span class="render-state" id="renderState">Idle</span>
+        </header>
+
+        <div class="render-actions">
+          <button class="secondary-action" id="previewButton" type="button">Preview</button>
+          <button class="primary-action" id="finalButton" type="button">Final Render</button>
+        </div>
+
+        <figure class="render-frame">
+          <img id="latestRender" alt="Latest physically rendered black hole frame" hidden />
+          <figcaption id="emptyRender">No render yet</figcaption>
+        </figure>
+
+        <dl class="render-meta">
+          <div>
+            <dt>Size</dt>
+            <dd id="metaSize">-</dd>
+          </div>
+          <div>
+            <dt>Samples</dt>
+            <dd id="metaSamples">-</dd>
+          </div>
+          <div>
+            <dt>Time</dt>
+            <dd id="metaTime">-</dd>
+          </div>
+        </dl>
+
+        <pre class="render-log" id="renderLog" aria-live="polite"></pre>
+      </aside>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+build/
+frames/
+viewer/node_modules/
+viewer/dist/
+viewer/renders/
+viewer/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
