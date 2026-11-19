@@ -3,10 +3,11 @@
 //  Equirectangular star-map loader.  Supports:
 //    * Radiance HDR  (.hdr / .pic)  -> linear HDR radiance (preferred)
 //    * Binary PPM    (.ppm, P6)     -> 8-bit sRGB, converted to linear
-//  Returned data is linear RGB, row-major, top-to-bottom (v=0 at top).
+//  Returned data is texture-ready linear RGBA, row-major, top-to-bottom.
 //  No external dependencies.
 // ============================================================================
 #include <cstdint>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -15,8 +16,8 @@
 
 struct StarMap {
     int w = 0, h = 0;
-    std::vector<float> rgb;          // w*h*3 linear RGB
-    bool valid() const { return w > 0 && h > 0 && (int)rgb.size() == w * h * 3; }
+    std::vector<float> rgba;
+    bool valid() const { return w > 0 && h > 0 && rgba.size() == (size_t)w * h * 4; }
 };
 
 namespace starmap {
@@ -31,36 +32,40 @@ inline bool load_hdr(FILE* f, StarMap& out) {
     char line[512];
     // Header: lines until a blank line.
     while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '\n') break;          // end of header
+        if (line[0] == '\n' || line[0] == '\r') break;
     }
     // Resolution line, e.g. "-Y 1024 +X 2048".
     if (!fgets(line, sizeof(line), f)) return false;
     int w = 0, h = 0;
-    if (sscanf(line, "-Y %d +X %d", &h, &w) != 2 &&
-        sscanf(line, "+Y %d +X %d", &h, &w) != 2) return false;
+    char vertical, horizontal;
+    if (sscanf(line, " %cY %d %cX %d", &vertical, &h, &horizontal, &w) != 4 ||
+        (vertical != '+' && vertical != '-') ||
+        (horizontal != '+' && horizontal != '-')) return false;
     if (w <= 0 || h <= 0) return false;
 
     out.w = w; out.h = h;
-    out.rgb.assign((size_t)w * h * 3, 0.0f);
+    out.rgba.resize((size_t)w * h * 4);
     std::vector<uint8_t> scan((size_t)w * 4);
 
     for (int y = 0; y < h; ++y) {
         // Read header of the scanline.
         int c0 = fgetc(f), c1 = fgetc(f), c2 = fgetc(f), c3 = fgetc(f);
-        if (c0 == EOF) return false;
+        if (c3 == EOF) return false;
         bool new_rle = (c0 == 2 && c1 == 2 && ((c2 << 8) | c3) == w && w >= 8 && w < 32768);
         if (new_rle) {
             for (int ch = 0; ch < 4; ++ch) {
                 int x = 0;
                 while (x < w) {
                     int cnt = fgetc(f);
-                    if (cnt == EOF) return false;
+                    if (cnt <= 0) return false;
                     if (cnt > 128) {           // run
                         int val = fgetc(f);
                         cnt -= 128;
-                        while (cnt-- > 0 && x < w) scan[x++ * 4 + ch] = (uint8_t)val;
+                        if (val == EOF || cnt > w - x) return false;
+                        while (cnt-- > 0) scan[x++ * 4 + ch] = (uint8_t)val;
                     } else {                   // dump
-                        while (cnt-- > 0 && x < w) {
+                        if (cnt > w - x) return false;
+                        while (cnt-- > 0) {
                             int val = fgetc(f);
                             if (val == EOF) return false;
                             scan[x++ * 4 + ch] = (uint8_t)val;
@@ -83,10 +88,13 @@ inline bool load_hdr(FILE* f, StarMap& out) {
         for (int x = 0; x < w; ++x) {
             uint8_t R = scan[x*4+0], G = scan[x*4+1], B = scan[x*4+2], E = scan[x*4+3];
             float fexp = (E == 0) ? 0.0f : ldexpf(1.0f, (int)E - (128 + 8));
-            size_t idx = ((size_t)y * w + x) * 3;
-            out.rgb[idx+0] = (R + 0.5f) * fexp;
-            out.rgb[idx+1] = (G + 0.5f) * fexp;
-            out.rgb[idx+2] = (B + 0.5f) * fexp;
+            const int row = vertical == '-' ? y : h - 1 - y;
+            const int column = horizontal == '+' ? x : w - 1 - x;
+            size_t idx = ((size_t)row * w + column) * 4;
+            out.rgba[idx+0] = (R + 0.5f) * fexp;
+            out.rgba[idx+1] = (G + 0.5f) * fexp;
+            out.rgba[idx+2] = (B + 0.5f) * fexp;
+            out.rgba[idx+3] = 1.0f;
         }
     }
     return true;
@@ -109,14 +117,30 @@ inline bool load_ppm(FILE* f, StarMap& out) {
     skip_ws(); if (fscanf(f, "%d", &w) != 1) return false;
     skip_ws(); if (fscanf(f, "%d", &h) != 1) return false;
     skip_ws(); if (fscanf(f, "%d", &maxv) != 1) return false;
-    fgetc(f); // single whitespace after maxval
+    int separator = fgetc(f);
+    if (separator == '\r') {
+        const int next = fgetc(f);
+        if (next != '\n' && next != EOF) ungetc(next, f);
+    } else if (separator != '\n' && separator != ' ' && separator != '\t') {
+        return false;
+    }
     if (w <= 0 || h <= 0 || maxv != 255) return false;
 
-    std::vector<uint8_t> buf((size_t)w * h * 3);
-    if (fread(buf.data(), 1, buf.size(), f) != buf.size()) return false;
+    std::array<float, 256> linear{};
+    for (size_t i = 0; i < linear.size(); ++i) linear[i] = srgb_to_linear((uint8_t)i);
+    std::vector<uint8_t> row((size_t)w * 3);
     out.w = w; out.h = h;
-    out.rgb.resize(buf.size());
-    for (size_t i = 0; i < buf.size(); ++i) out.rgb[i] = srgb_to_linear(buf[i]);
+    out.rgba.resize((size_t)w * h * 4);
+    for (int y = 0; y < h; ++y) {
+        if (fread(row.data(), 1, row.size(), f) != row.size()) return false;
+        float* pixel = out.rgba.data() + (size_t)y * w * 4;
+        for (size_t i = 0; i < row.size(); i += 3, pixel += 4) {
+            pixel[0] = linear[row[i]];
+            pixel[1] = linear[row[i + 1]];
+            pixel[2] = linear[row[i + 2]];
+            pixel[3] = 1.0f;
+        }
+    }
     return true;
 }
 

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Live Kerr shadow regression</title>
+<style>canvas { display: block; width: 900px; height: 500px } body { background: #17191d; color: white; font: 16px monospace }</style>
+<h1>Live Kerr shadow regression</h1>
+<p>Comparing GPU captures with spherical photon-orbit predictions at a finite ZAMO observer.</p>
+<canvas aria-label="Shadow test viewport"></canvas>
+<pre>Running…</pre>
+<script type="module">
+import * as THREE from 'three';
+import { BlackHoleScene } from '../src/BlackHoleScene';
+import { DEFAULT_SETTINGS } from '../src/types';
+
+// Continuous pixel-edge extents [left, right, top, bottom]. From the critical
+// spherical-orbit constants xi, eta projected into the observer's local frame.
+// Radius 48 M, vertical FOV 38°, viewport 900×500. Latitude is measured by theta.
+const cases = [
+  [90, 0,    [372.622, 527.378, 172.622, 327.378]],
+  [90, .9,   [407.816, 552.136, 172.571, 327.429]],
+  [90, .999, [419.206, 554.663, 172.559, 327.441]],
+  [ 1, 0,    [372.622, 527.378, 172.622, 327.378]],
+  [ 1, .9,   [377.388, 523.689, 176.847, 323.153]],
+  [ 1, .999, [378.787, 522.477, 178.151, 321.849]],
+  // A quarter-turn rotates the displaced Kerr shadow about the optical axis.
+  [90, .9, [372.571, 527.429, 207.816, 352.136], 90]
+];
+
+const report = document.querySelector('pre');
+const settings = { ...DEFAULT_SETTINGS, camR: 48, roll: 0, cinematic: false, fov: 38, diskBright: 0, diskAbsorb: 0, thin: false, photosphere: false };
+let scene;
+try {
+  scene = new BlackHoleScene(document.querySelector('canvas'), settings, () => {});
+  scene.setPaused(true);
+  scene.setQuality('high');
+  scene.setStarTexture(new THREE.DataTexture(new Uint8Array(4 * 4 * 4).fill(255), 4, 4));
+  const raster = new OffscreenCanvas(900, 500);
+  const ctx = raster.getContext('2d', { willReadFrequently: true });
+  const results = [];
+  for (const model of ['schwarzschild', 'kerr']) {
+    scene.setLensingModel(model);
+    for (const [theta, spin, extents, roll = 0] of cases) {
+      scene.setSettings({ ...settings, spin, camTheta: theta, roll }, { syncCamera: true });
+      const image = await createImageBitmap(await scene.capture());
+      ctx.drawImage(image, 0, 0, 900, 500);
+      image.close();
+      const { data } = ctx.getImageData(0, 0, 900, 500);
+      let left = 900, right = 0, top = 500, bottom = 0;
+      for (let y = 0; y < 500; y++) {
+        for (let x = 0; x < 900; x++) {
+          if (data[4 * (y * 900 + x)] > 100) continue;
+          left = Math.min(left, x); right = Math.max(right, x + 1);
+          top = Math.min(top, y); bottom = Math.max(bottom, y + 1);
+        }
+      }
+      const expected = model === 'kerr' ? extents : cases[0][2];
+      const error = Math.max(...[left, right, top, bottom].map((x, i) => Math.abs(x - expected[i])));
+      results.push(`${model}  θ=${theta}°  a=${spin}  roll=${roll}°  max edge error ${error.toFixed(3)} px`);
+      if (error > 1) throw new Error(results.join('\n'));
+    }
+  }
+  // With an unlit, edge-on opaque disk and a white sky, finite height
+  // blocks direct background rays outside the central black-hole shadow.
+  // The equatorial sheet and the zero-spin lens comparison isolate geometry.
+  const edgeOn = {...settings, spin: 0, camTheta: 90, diskOuter: 22, skyBright: 1,
+                  thin: true, diskThick: .85, diskFlare: .07, diskNoise: 0};
+  let reference;
+  for (const model of ['schwarzschild', 'kerr']) {
+    scene.setLensingModel(model);
+    scene.setSettings({...edgeOn, photosphere: false}, {syncCamera: true});
+    const sheet = await diskPixels();
+    scene.setSettings({...edgeOn, photosphere: true}, {syncCamera: true});
+    const body = await diskPixels();
+    let newShadow = 0, disagreement = 0;
+    for (let y = 0; y < 200; y++) for (let x = 0; x < 360; x++) {
+      const i = 4 * (360*y+x);
+      if (Math.abs(x-180) > 50 && Math.abs(y-100) < 12 && sheet[i] > 180 && body[i] < 40) newShadow++;
+      if (reference && (reference[i] < 100) !== (body[i] < 100)) disagreement++;
+    }
+    if (newShadow < 400) throw new Error(model + ' finite photosphere lost its foreground silhouette');
+    if (disagreement > 200) throw new Error('Zero-spin photosphere outlines diverged at ' + disagreement + ' pixels');
+    results.push(model + ' opaque foreground covered ' + newShadow + ' additional pixels'
+      + (reference ? ', zero-spin silhouette disagreement ' + disagreement : ''));
+    reference = body;
+  }
+  // A fixed camera and black sky isolate disk motion. Redraw snapshots to
+  // catch a ticking shader that ignores pause or a frozen pattern that drifts.
+  scene.setStarTexture(new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1));
+  scene.setQuality('performance');
+  scene.setPlaybackRate(24);
+  async function diskPixels() {
+    const image = await createImageBitmap(await scene.capture());
+    ctx.drawImage(image, 0, 0, 360, 200);
+    image.close();
+    return ctx.getImageData(0, 0, 360, 200).data;
+  }
+  async function advance() {
+    const start = scene.getObserverTime();
+    scene.setPaused(false);
+    while (scene.getObserverTime() < start + 12) await new Promise(requestAnimationFrame);
+    scene.setPaused(true);
+  }
+  function countChanges(a, b, threshold) {
+    let count = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      if (Math.abs(a[i] - b[i]) > threshold || Math.abs(a[i+1] - b[i+1]) > threshold
+          || Math.abs(a[i+2] - b[i+2]) > threshold) count++;
+    }
+    return count;
+  }
+  for (const model of ['schwarzschild', 'kerr']) {
+    scene.setLensingModel(model);
+    scene.setSettings(DEFAULT_SETTINGS, { syncCamera: true });
+    scene.setObserverTime(20);
+    const initial = await diskPixels();
+    if (countChanges(initial, await diskPixels(), 0)) throw new Error(model + ' moved while paused');
+    await advance();
+    const changed = countChanges(initial, await diskPixels(), 4);
+    if (changed < 360 * 200 * .02) throw new Error(model + ' disk did not orbit at a fixed camera');
+    scene.setObserverTime(20);
+    if (countChanges(initial, await diskPixels(), 0)) throw new Error(model + ' time step failed to reproduce the same disk');
+    scene.setSettings({ ...DEFAULT_SETTINGS, staticDiskPattern: true });
+    const frozen = await diskPixels();
+    await advance();
+    if (countChanges(frozen, await diskPixels(), 0)) throw new Error(model + ' static material moved');
+    scene.setSettings({ ...DEFAULT_SETTINGS, staticDiskPattern: true, cinematic: !DEFAULT_SETTINGS.cinematic });
+    if (countChanges(frozen, await diskPixels(), 2) < 360 * 200 * .01) {
+      throw new Error(model + ' camera response did not change the captured exposure');
+    }
+    scene.setSettings({ ...DEFAULT_SETTINGS, staticDiskPattern: true });
+    if (countChanges(frozen, await diskPixels(), 0)) throw new Error(model + ' camera response failed to round-trip');
+    results.push(model + ' disk motion, pause and static pattern passed');
+  }
+  document.body.dataset.result = 'passed';
+  report.textContent = `Passed ${2 * cases.length} shadow comparisons, the opaque disk edge and both disk animation checks.\n\n` + results.join('\n');
+} catch (error) {
+  document.body.dataset.result = 'failed';
+  report.textContent = String(error);
+} finally {
+  scene?.dispose();
+  if (new URL(location.href).searchParams.has('report')) {
+    await fetch('/__shadow_result', { method: 'POST', body: JSON.stringify({
+      status: document.body.dataset.result, message: report.textContent
+    }) });
+  }
+}
+</script>
+</html>

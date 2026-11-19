@@ -38,6 +38,7 @@ __host__ __device__ __forceinline__ vec3 normalize(vec3 a) {
 // ---- float3 colour helpers ----
 __host__ __device__ __forceinline__ float3 mkc(float r, float g, float b) { return make_float3(r, g, b); }
 __host__ __device__ __forceinline__ float3 operator+(float3 a, float3 b) { return make_float3(a.x+b.x, a.y+b.y, a.z+b.z); }
+__host__ __device__ __forceinline__ float3 operator-(float3 a, float3 b) { return make_float3(a.x-b.x, a.y-b.y, a.z-b.z); }
 __host__ __device__ __forceinline__ float3 operator*(float3 a, float s) { return make_float3(a.x*s, a.y*s, a.z*s); }
 __host__ __device__ __forceinline__ float3 operator*(float s, float3 a) { return make_float3(a.x*s, a.y*s, a.z*s); }
 __host__ __device__ __forceinline__ float3 operator*(float3 a, float3 b) { return make_float3(a.x*b.x, a.y*b.y, a.z*b.z); }

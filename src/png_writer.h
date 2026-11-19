@@ -1,13 +1,16 @@
 #pragma once
 // ============================================================================
-//  Tiny, dependency-free PNG writer (8-bit RGB).
-//  Uses uncompressed DEFLATE ("stored" blocks) so it needs no zlib.
-//  Produces valid, viewable PNG files (larger than compressed ones).
+//  8-bit RGB PNG writer. Use fast lossless compression when zlib is
+//  installed; the standalone build emits stored DEFLATE blocks.
 // ============================================================================
 #include <cstdint>
 #include <cstdio>
 #include <vector>
 #include <string>
+#include <limits>
+#ifdef GARGANTUA_HAVE_ZLIB
+#include <zlib.h>
+#endif
 
 namespace png {
 
@@ -18,9 +21,14 @@ inline uint32_t crc32_byte(uint32_t crc, uint8_t b) {
     return crc;
 }
 
-inline uint32_t crc32_buf(const uint8_t* data, size_t n, uint32_t crc = 0xFFFFFFFFu) {
+inline uint32_t crc32_buf(const uint8_t* data, size_t n) {
+#ifdef GARGANTUA_HAVE_ZLIB
+    return (uint32_t)::crc32(0, data, (uInt)n);
+#else
+    uint32_t crc = 0xFFFFFFFFu;
     for (size_t i = 0; i < n; ++i) crc = crc32_byte(crc, data[i]);
-    return crc;
+    return crc ^ 0xFFFFFFFFu;
+#endif
 }
 
 inline void put_u32(std::vector<uint8_t>& v, uint32_t x) {
@@ -38,24 +46,33 @@ inline void write_chunk(std::vector<uint8_t>& out, const char* type,
     out.push_back(type[2]); out.push_back(type[3]);
     out.insert(out.end(), data.begin(), data.end());
     uint32_t crc = crc32_buf(out.data() + crc_start, out.size() - crc_start);
-    put_u32(out, crc ^ 0xFFFFFFFFu);
+    put_u32(out, crc);
 }
 
 // rgb: width*height*3 bytes, row-major, top-to-bottom.
 inline bool write(const std::string& path, int w, int h, const std::vector<uint8_t>& rgb) {
-    if ((int)rgb.size() != w * h * 3) return false;
+    if (w <= 0 || h <= 0 || rgb.size() != (size_t)w * h * 3) return false;
+    const size_t stride = (size_t)w * 3;
 
     // Build raw scanline data with filter byte 0 per row.
     std::vector<uint8_t> raw;
-    raw.reserve((size_t)h * (w * 3 + 1));
+    raw.reserve((size_t)h * (stride + 1));
     for (int y = 0; y < h; ++y) {
         raw.push_back(0); // filter type "None"
-        const uint8_t* row = rgb.data() + (size_t)y * w * 3;
-        raw.insert(raw.end(), row, row + w * 3);
+        const uint8_t* row = rgb.data() + (size_t)y * stride;
+        raw.insert(raw.end(), row, row + stride);
     }
 
-    // zlib stream: 2-byte header + stored DEFLATE blocks + Adler32.
     std::vector<uint8_t> zlib;
+#ifdef GARGANTUA_HAVE_ZLIB
+    if (raw.size() > std::numeric_limits<uLong>::max()) return false;
+    uLongf compressed = compressBound((uLong)raw.size());
+    zlib.resize(compressed);
+    if (compress2(zlib.data(), &compressed, raw.data(), (uLong)raw.size(), Z_BEST_SPEED) != Z_OK)
+        return false;
+    zlib.resize(compressed);
+#else
+    // zlib stream: 2-byte header + stored DEFLATE blocks + Adler32.
     zlib.push_back(0x78); // CMF
     zlib.push_back(0x01); // FLG (no compression, check bits)
 
@@ -81,8 +98,10 @@ inline bool write(const std::string& path, int w, int h, const std::vector<uint8
     }
     uint32_t adler = (b << 16) | a;
     put_u32(zlib, adler);
+#endif
 
     // Assemble PNG.
+    if (zlib.size() > std::numeric_limits<int32_t>::max()) return false;
     std::vector<uint8_t> out;
     const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
     out.insert(out.end(), sig, sig + 8);
@@ -101,9 +120,9 @@ inline bool write(const std::string& path, int w, int h, const std::vector<uint8
 
     FILE* f = fopen(path.c_str(), "wb");
     if (!f) return false;
-    fwrite(out.data(), 1, out.size(), f);
-    fclose(f);
-    return true;
+    const size_t written = fwrite(out.data(), 1, out.size(), f);
+    const int close_status = fclose(f);
+    return written == out.size() && close_status == 0;
 }
 
 } // namespace png

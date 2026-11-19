@@ -19,17 +19,19 @@ __device__ __forceinline__ float hash_f(unsigned x) {
     return (hash_u(x) & 0x00FFFFFF) / (float)0x01000000;
 }
 __device__ __forceinline__ unsigned cell_hash(int i, int j) {
-    return hash_u((unsigned)(i * 73856093) ^ (unsigned)(j * 19349663));
+    return hash_u((unsigned)i * 73856093u ^ (unsigned)j * 19349663u);
 }
 
-// Smooth value noise on the equirect plane (for a faint nebula glow).
-__device__ __forceinline__ float vnoise(float u, float v) {
+// Smooth disk noise with a periodic azimuthal lattice.
+__device__ __forceinline__ float vnoise(float u, float v, int period) {
     int i = (int)floorf(u), j = (int)floorf(v);
     float fu = u - i, fv = v - j;
+    if (j == period) j = 0;
+    const int next_j = j + 1 < period ? j + 1 : 0;
     float a = hash_f(cell_hash(i,   j));
     float b = hash_f(cell_hash(i+1, j));
-    float c = hash_f(cell_hash(i,   j+1));
-    float d = hash_f(cell_hash(i+1, j+1));
+    float c = hash_f(cell_hash(i,   next_j));
+    float d = hash_f(cell_hash(i+1, next_j));
     float su = fu*fu*(3-2*fu), sv = fv*fv*(3-2*fv);
     return (a*(1-su)+b*su)*(1-sv) + (c*(1-su)+d*su)*sv;
 }

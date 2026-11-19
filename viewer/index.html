@@ -1,99 +1,170 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Gargantua Interactive Map</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#111314" />
+    <title>Gargantua · Black hole simulator</title>
+    <link rel="preload" as="image" href="/gargantua-preview.webp" />
+    <link rel="stylesheet" href="/loading.css" />
+    <script src="/loading.js" defer></script>
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="control-rail" aria-label="Simulation controls">
-        <header class="brand-block">
-          <span class="eyebrow">Gargantua</span>
-          <h1>Interactive Map</h1>
-        </header>
-
-        <nav class="preset-strip" id="presetStrip" aria-label="View presets"></nav>
-
-        <section class="control-section">
-          <h2>Camera</h2>
-          <div class="control-stack" id="cameraControls"></div>
-        </section>
-
-        <section class="control-section">
-          <h2>Black Hole</h2>
-          <div class="control-stack" id="physicsControls"></div>
-        </section>
-
-        <section class="control-section">
-          <h2>Disk</h2>
-          <div class="control-stack" id="diskControls"></div>
-        </section>
-
-        <section class="control-section">
-          <h2>Render</h2>
-          <div class="control-stack" id="renderControls"></div>
-          <label class="toggle-row">
-            <input id="thinDisk" type="checkbox" />
-            <span>Thin disk</span>
-          </label>
-          <label class="toggle-row">
-            <input id="noDoppler" type="checkbox" />
-            <span>No Doppler</span>
-          </label>
-          <label class="toggle-row">
-            <input id="autoPreview" type="checkbox" />
-            <span>Auto preview</span>
-          </label>
-        </section>
-      </aside>
-
-      <main class="viewport-shell">
-        <canvas id="sceneCanvas" aria-label="Interactive black hole map"></canvas>
-        <div class="viewport-hud">
-          <span class="status-pill" id="healthStatus">Checking renderer</span>
-          <span class="camera-readout" id="cameraReadout">r 60.0 / theta 84.0 / phi 0.0</span>
+    <gargantua-loader step="4" message="Loading the simulation…">Loading Gargantua…</gargantua-loader>
+    <noscript><style>gargantua-loader, #app { display: none }</style>Enable JavaScript to start the simulator.</noscript>
+    <div class="app" id="app" inert>
+      <header class="topbar">
+        <div class="brand"><i class="brand-mark" aria-hidden="true"></i>Gargantua</div>
+        <span class="product-name">Black hole simulator</span>
+        <nav class="mode-switch" id="modeSwitch" role="tablist" aria-label="Simulation mode">
+          <button role="tab" id="modeSandbox" data-mode="sandbox" aria-selected="true">Sandbox</button>
+          <button role="tab" id="modeCatalog" data-mode="catalog" aria-selected="false" tabindex="-1">Black holes</button>
+          <button role="tab" id="modeScenarios" data-mode="scenarios" aria-selected="false" tabindex="-1">Scenarios</button>
+        </nav>
+        <div class="header-actions">
+          <span class="fps" title="Measured viewer frame rate"><i class="signal" aria-hidden="true"></i><span id="fps">— FPS</span></span>
+          <button class="quiet help-button" id="helpButton" title="Keyboard controls (?)"><i data-icon="keyboard"></i><span>Controls</span></button>
+          <button class="accent" id="captureButton"><i data-icon="camera"></i><span>Capture frame</span></button>
         </div>
+      </header>
+      <main class="workspace">
+        <div class="observation">
+          <section class="viewport" id="viewport" aria-label="Observation viewport">
+            <canvas id="sceneCanvas" tabindex="0" aria-label="Black hole simulation. Drag or use the arrow keys to orbit. Scroll, pinch or use plus and minus to zoom."></canvas>
+            <img class="physical-frame" id="refinedFrame" alt="Stationary view traced through Kerr spacetime" hidden />
+            <div class="viewport-heading">
+              <div class="live-tag" id="liveTag"><i></i><span id="liveLabel">Starting viewport</span></div>
+              <h1 id="viewTitle">Equatorial orbit</h1>
+              <p class="view-subtitle" id="viewSubtitle" hidden></p>
+            </div>
+            <div class="viewport-tools">
+              <label class="sky-picker glass" title="Select the lensed sky background">
+                <img id="skyThumb" alt="" /><select id="skySelect" aria-label="Sky background"></select>
+              </label>
+              <button class="glass focus-button" id="focusButton" title="Focus view (H)" aria-label="Focus view" aria-pressed="false"><i data-icon="expand"></i></button>
+            </div>
+            <p class="scene-notice" id="sceneNotice" role="status" hidden></p>
+            <div class="scenario-readouts" id="scenarioReadouts" hidden></div>
+            <div class="viewport-bottom">
+              <dl class="telemetry" id="telemetry">
+                <div><dt>Distance</dt><dd><span id="distance">50.0</span> <small>M</small></dd></div>
+                <div><dt>Inclination</dt><dd id="inclination">83.0°</dd></div>
+                <div><dt>Azimuth</dt><dd id="azimuth">45.0°</dd></div>
+              </dl>
+              <div class="transport">
+                <button id="pauseButton" title="Pause animation (Space)" aria-label="Pause animation" aria-pressed="false"><i data-icon="pause"></i></button>
+                <select id="playbackRate" aria-label="Disk playback rate" title="Disk playback rate in gravitational time units per second"><option value="3">0.25×</option><option value="12" selected>1×</option><option value="36">3×</option><option value="120">10×</option></select>
+                <button id="orbitButton" title="Auto-orbit (O)" aria-pressed="false"><i data-icon="orbit"></i><span>Auto-orbit</span></button>
+              </div>
+            </div>
+          </section>
+          <section class="presets" id="cameraPresets" aria-labelledby="presetsTitle">
+            <div class="section-heading"><h2 id="presetsTitle">Camera presets</h2><span class="key-hint"><kbd>1</kbd> – <kbd>4</kbd> to switch</span></div>
+            <div class="preset-strip" id="presetStrip"></div>
+          </section>
+          <section class="presets catalog" id="catalogSection" aria-labelledby="catalogTitle" hidden>
+            <div class="section-heading"><h2 id="catalogTitle">Known black holes</h2><span class="key-hint">Measured masses · literature parameters</span></div>
+            <div class="catalog-strip" id="catalogStrip" role="list"></div>
+          </section>
+          <section class="presets scenario-plots" id="scenarioPlots" aria-label="Scenario plots" hidden></section>
+        </div>
+        <aside class="inspector" id="inspector" aria-label="Simulation inspector">
+          <header class="inspector-head"><h2><i data-icon="sliders"></i>Inspector</h2><button id="resetButton" class="plain-icon" title="Reset simulation" aria-label="Reset simulation"><i data-icon="reset"></i></button></header>
+          <div class="tabs" role="tablist" aria-label="Inspector sections" id="tabs">
+            <button role="tab" id="objectTab" aria-controls="objectPanel" aria-selected="false" tabindex="-1" hidden>Object</button>
+            <button role="tab" id="scenarioTab" aria-controls="scenarioPanel" aria-selected="false" tabindex="-1" hidden>Scenario</button>
+            <button role="tab" id="sceneTab" aria-controls="scenePanel" aria-selected="false" tabindex="-1">Scene</button>
+            <button role="tab" id="diskTab" aria-controls="diskPanel" aria-selected="true">Disk</button>
+            <button role="tab" id="cameraTab" aria-controls="cameraPanel" aria-selected="false" tabindex="-1">Camera</button>
+          </div>
+          <div class="inspector-body">
+            <div role="tabpanel" id="objectPanel" aria-labelledby="objectTab" hidden></div>
+            <div role="tabpanel" id="scenarioPanel" aria-labelledby="scenarioTab" hidden>
+              <section class="panel-section"><h3>Scenario</h3><div class="scenario-picker" id="scenarioPicker" role="list"></div></section>
+              <div id="scenarioControls"></div>
+            </div>
+            <div role="tabpanel" id="scenePanel" aria-labelledby="sceneTab" hidden>
+              <section class="panel-section"><h3>Black hole</h3><div class="control-stack" id="physicsControls"></div></section>
+              <section class="panel-section sky-source"><h3>Sky map</h3><p id="skyCredit"></p></section>
+              <section class="panel-section"><h3>Relativistic effects</h3>
+                <label class="toggle-row"><span>Doppler shift</span><input type="checkbox" id="doppler" role="switch" /></label>
+                <label class="toggle-row"><span>Gravitational redshift</span><input type="checkbox" id="redshift" role="switch" /></label>
+              </section>
+              <section class="panel-section geometry"><h3>Kerr geometry</h3><div class="geometry-body">
+                <div class="radii-diagram" aria-hidden="true"><i id="horizonCircle"></i></div>
+                <dl><div><dt><i class="horizon-dot"></i>Outer horizon</dt><dd id="horizonValue"></dd></div><div><dt><i class="isco-dot"></i>Prograde ISCO</dt><dd id="iscoValue"></dd></div></dl>
+              </div></section>
+            </div>
+            <div role="tabpanel" id="diskPanel" aria-labelledby="diskTab">
+              <section class="panel-section"><h3>Appearance</h3>
+                <label class="select-row"><span>Reference scene</span><select id="referenceScene"><option value="">Load a scene…</option><option value="film">Film-inspired</option><option value="physical">High spin</option></select></label>
+                <label class="select-row"><span>Disk geometry</span><select id="diskGeometry"><option value="photosphere">Photosphere</option><option value="thin">Thin sheet</option><option value="volume">Emitting volume</option></select></label>
+                <label class="toggle-row" title="Scatter bright light in the camera and roll off highlights"><span>Cinematic optics</span><input type="checkbox" id="cinematic" role="switch" /></label>
+              </section>
+              <section class="panel-section flow-section">
+                <div class="flow-title"><h3>Orbital motion</h3><div class="flow-time">
+                  <button id="stepBack" title="Pause and step back 5 M ([)" aria-label="Step back 5 gravitational time units">−</button>
+                  <output id="flowClock" aria-live="off" aria-label="Observer coordinate time">0 M</output>
+                  <button id="stepForward" title="Pause and step forward 5 M (])" aria-label="Step forward 5 gravitational time units">+</button>
+                </div></div>
+                <div class="flow-instrument" role="img" aria-label="Two equatorial tracer orbits at the displayed radii">
+                  <div class="flow-plot" aria-hidden="true"><i id="flowHorizon"></i><i class="orbit-path outer-path"><b></b></i><i class="orbit-path inner-path"><b></b></i></div>
+                  <div class="flow-readings"><div><i></i><span id="innerRadius"></span><strong id="innerPeriod"></strong></div><div><i></i><span id="outerRadius"></span><strong id="outerPeriod"></strong></div></div>
+                </div>
+                <p class="flow-note">Coordinate periods of two prograde tracers in the disk plane. Time in GM/c³.</p>
+                <p class="flow-note">Flow adapted from <a href="https://thz.astro.illinois.edu/v3_grmhd.html" target="_blank" rel="noreferrer">Illinois GRMHD · Dhruv et al.</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a></p>
+              </section>
+              <section class="panel-section"><h3>Accretion disk</h3><div id="diskControls" class="control-stack"></div></section>
+              <section class="panel-section"><h3>Emission model</h3>
+                <label class="toggle-row"><span>Freeze orbiting material</span><input type="checkbox" id="staticDiskPattern" role="switch" /></label>
+                <label class="toggle-row"><span>Legacy flux profile</span><input type="checkbox" id="legacyDiskModel" role="switch" /></label>
+              </section>
+            </div>
+            <div role="tabpanel" id="cameraPanel" aria-labelledby="cameraTab" hidden>
+              <section class="panel-section"><h3>Observer position</h3><div id="cameraControls" class="control-stack"></div></section>
+              <section class="panel-section"><h3>Navigation</h3><p>Drag to orbit and scroll to change distance. On a touchscreen, orbit with one finger and pinch to zoom.</p>
+                <button class="outline wide" id="fullscreenButton"><i data-icon="expand"></i>Fullscreen</button>
+              </section>
+            </div>
+            <section class="panel-section viewport-controls"><h3>Viewport</h3>
+              <label class="select-row"><span>Light paths</span><select id="lensingModel"><option value="auto">Automatic</option><option value="kerr">Kerr</option><option value="schwarzschild">Schwarzschild</option></select></label>
+              <label class="select-row"><span>Quality</span><select id="quality"><option value="auto">Adaptive</option><option value="high">High</option><option value="performance">Performance</option></select></label>
+              <label class="toggle-row" title="Trace a stationary camera view with the local CUDA Kerr renderer"><span>Kerr still on idle</span><input type="checkbox" id="autoPreview" role="switch" disabled /></label>
+              <p class="engine-status" id="healthStatus">Checking CUDA renderer…</p>
+            </section>
+          </div>
+        </aside>
       </main>
-
-      <aside class="render-rail" aria-label="Accurate render output">
-        <header class="render-header">
-          <div>
-            <span class="eyebrow">CUDA Output</span>
-            <h2>Accurate Frame</h2>
-          </div>
-          <span class="render-state" id="renderState">Idle</span>
-        </header>
-
-        <div class="render-actions">
-          <button class="secondary-action" id="previewButton" type="button">Preview</button>
-          <button class="primary-action" id="finalButton" type="button">Final Render</button>
-        </div>
-
-        <figure class="render-frame">
-          <img id="latestRender" alt="Latest physically rendered black hole frame" hidden />
-          <figcaption id="emptyRender">No render yet</figcaption>
-        </figure>
-
-        <dl class="render-meta">
-          <div>
-            <dt>Size</dt>
-            <dd id="metaSize">-</dd>
-          </div>
-          <div>
-            <dt>Samples</dt>
-            <dd id="metaSamples">-</dd>
-          </div>
-          <div>
-            <dt>Time</dt>
-            <dd id="metaTime">-</dd>
-          </div>
-        </dl>
-
-        <pre class="render-log" id="renderLog" aria-live="polite"></pre>
-      </aside>
+      <footer class="statusbar"><span><i class="status-dot"></i><span id="engineLabel">Initializing viewport</span></span><span><i data-icon="mouse"></i>Drag to orbit <b>·</b> Scroll to zoom</span></footer>
     </div>
-
-    <script type="module" src="/src/main.ts"></script>
+    <dialog id="captureDialog" aria-labelledby="captureTitle">
+      <div class="dialog-head"><h2 id="captureTitle">Capture frame</h2><button class="plain-icon" aria-label="Close capture" data-close><i data-icon="close"></i></button></div>
+      <section class="dialog-section"><h3>Viewport snapshot</h3><p>Save the current view as a PNG, including any stationary Kerr refinement.</p>
+        <button class="accent" id="snapshotButton"><i data-icon="download"></i>Save viewport PNG</button>
+      </section>
+      <section class="dialog-section"><h3>Kerr ray trace</h3><p id="captureHealth">Checking CUDA renderer…</p>
+        <label class="select-row"><span>Image size</span><select id="captureSize"><option value="1920">Full HD</option><option value="3840">4K UHD</option><option value="7680">8K UHD</option><option value="custom">Custom</option></select></label>
+        <label class="select-row" title="Single precision is about 20× faster and matches double precision to a fraction of an 8-bit level for direct and first lensed images. Double precision resolves the higher-order photon rings at 8K."><span>Geodesic precision</span><select id="capturePrecision"><option value="double">Double · reference</option><option value="single">Single · ~20× faster</option></select></label>
+        <div class="render-inputs">
+          <label>Width <input type="number" id="widthInput" min="160" max="7680" step="1" required /></label>
+          <label>Height <input type="number" id="heightInput" min="90" max="7680" step="1" required /></label>
+          <label>Samples / pixel <input type="number" id="samplesInput" min="1" max="64" step="1" required /></label>
+          <label title="Duration of a final exposure in gravitational time units. Use multiple samples to resolve motion.">Shutter (M) <input type="number" id="shutterInput" min="0" max="64" step="0.1" required /></label>
+        </div>
+        <div class="render-actions"><button class="outline" id="previewButton" disabled>Preview</button><button class="accent" id="finalButton" disabled>Render PNG</button><button class="quiet" id="cancelButton" hidden>Cancel</button></div>
+        <p id="renderState" class="result-status" role="status"></p>
+        <div id="result" hidden><img id="latestRender" alt="Latest Kerr render" /><a id="saveRender" class="download" download>Download render</a></div>
+        <details id="logDetails" hidden><summary>Render diagnostics</summary><pre id="renderLog"></pre></details>
+      </section>
+    </dialog>
+    <dialog id="helpDialog" aria-labelledby="helpTitle">
+      <div class="dialog-head"><h2 id="helpTitle">Flight controls</h2><button class="plain-icon" data-close aria-label="Close controls"><i data-icon="close"></i></button></div>
+      <dl class="shortcut-list">
+        <div><dt>Orbit camera</dt><dd>Drag / arrow keys</dd></div><div><dt>Zoom</dt><dd>Scroll / pinch / + −</dd></div>
+        <div><dt>Camera presets</dt><dd>1 – 4</dd></div><div><dt>Pause / resume</dt><dd>Space</dd></div><div><dt>Step time by 5 M</dt><dd>[ / ]</dd></div><div><dt>Auto-orbit</dt><dd>O</dd></div>
+        <div><dt>Focus view</dt><dd>H</dd></div><div><dt>Fullscreen</dt><dd>F</dd></div><div><dt>Capture frame</dt><dd>C</dd></div>
+      </dl><p class="help-note">Focus the viewport to use arrow and zoom keys. On a standard gamepad, orbit with the left stick, zoom with the triggers, pause with A, switch presets with RB, and focus with Y. Distances are measured in gravitational radii, M = GM/c².</p>
+    </dialog>
+    <script type="module" src="/src/bootstrap.ts"></script>
   </body>
 </html>

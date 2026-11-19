@@ -1,5 +1,6 @@
 #pragma once
 #include "vec_math.cuh"
+#include <array>
 #include <vector>
 #include <cmath>
 
@@ -8,16 +9,16 @@
 //
 //  A temperature -> linear-sRGB lookup table is built on the host by
 //  integrating Planck's law against analytic approximations of the CIE 1931
-//  colour-matching functions (Wyman, Sloan & Shirley, JCGT 2013).  Each entry
-//  is normalised to unit luminance (Y = 1) so that brightness can be applied
-//  separately from chromaticity.
+//  colour-matching functions (Wyman, Sloan & Shirley, JCGT 2013). One
+//  reference luminance scales the entire table, preserving the visible-band
+//  response throughout the Wien and Rayleigh-Jeans regimes.
 // ============================================================================
 
 namespace bb {
 
 constexpr int    LUT_N    = 1024;
-constexpr double LUT_TMIN = 500.0;     // Kelvin
-constexpr double LUT_TMAX = 40000.0;   // Kelvin
+constexpr double LUT_TMIN = 200.0;     // Kelvin
+constexpr double LUT_TMAX = 1000000.0; // Kelvin
 
 // Single Gaussian lobe used by the CIE CMF approximation.
 inline double globe(double x, double mu, double s1, double s2) {
@@ -35,49 +36,62 @@ inline void cie_xyz_bar(double lam /*nm*/, double& X, double& Y, double& Z) {
       + 0.681 * globe(lam, 459.0, 0.0385, 0.0725);
 }
 
-// Planck spectral radiance (arbitrary scale; only the shape matters here).
+// Planck spectral radiance with the common factor 2 h c^2 omitted.
 inline double planck(double lam_nm, double T) {
     double lam = lam_nm * 1e-9;           // metres
     const double c2 = 1.438776877e-2;     // h c / k_B  [m K]
-    return 1.0 / (lam*lam*lam*lam*lam * (std::exp(c2 / (lam * T)) - 1.0));
+    return 1.0 / (lam*lam*lam*lam*lam * std::expm1(c2 / (lam * T)));
 }
 
-// Build the LUT: returns LUT_N * 3 floats of Y-normalised linear sRGB.
-inline std::vector<float> build_lut() {
+// Use the integrated Y at the reference temperature for exposure. The
+// 500 K floor keeps optical intensities representable for infrared-only disks.
+inline std::vector<float> build_lut(double reference_temperature = 9000.0) {
+    struct Band { double lambda, x, y, z; };
+    std::array<Band, 201> bands;
+    double reference_y = 0;
+    for (size_t j = 0; j < bands.size(); ++j) {
+        auto& band = bands[j];
+        band.lambda = 380.0 + 2.0 * j;
+        cie_xyz_bar(band.lambda, band.x, band.y, band.z);
+        reference_y += band.y * planck(band.lambda, fmax(500.0, reference_temperature));
+    }
     std::vector<float> lut(LUT_N * 3);
     for (int i = 0; i < LUT_N; ++i) {
-        double f = (double)i / (LUT_N - 1);
-        double T = LUT_TMIN * std::pow(LUT_TMAX / LUT_TMIN, f); // log spaced
+        const double f = (double)i / (LUT_N - 1);
+        const double T = LUT_TMIN * std::pow(LUT_TMAX / LUT_TMIN, f);
         double X = 0, Y = 0, Z = 0;
-        for (double lam = 380.0; lam <= 780.0; lam += 2.0) {
-            double xb, yb, zb;
-            cie_xyz_bar(lam, xb, yb, zb);
-            double P = planck(lam, T);
-            X += P * xb; Y += P * yb; Z += P * zb;
+        for (const auto& band : bands) {
+            const double radiance = planck(band.lambda, T);
+            X += radiance * band.x;
+            Y += radiance * band.y;
+            Z += radiance * band.z;
         }
-        // XYZ -> linear sRGB (D65).
-        double R =  3.2406 * X - 1.5372 * Y - 0.4986 * Z;
-        double G = -0.9689 * X + 1.8758 * Y + 0.0415 * Z;
-        double B =  0.0557 * X - 0.2040 * Y + 1.0570 * Z;
-        R = R < 0 ? 0 : R; G = G < 0 ? 0 : G; B = B < 0 ? 0 : B;
-        double Ynorm = (Y > 1e-12) ? Y : 1.0;          // normalise to unit luminance
-        lut[i*3+0] = (float)(R / Ynorm);
-        lut[i*3+1] = (float)(G / Ynorm);
-        lut[i*3+2] = (float)(B / Ynorm);
+        // XYZ -> linear sRGB (D65); gamut-clip only negative channels.
+        lut[i*3+0] = (float)(fmax(0.0,  3.2406*X - 1.5372*Y - 0.4986*Z) / reference_y);
+        lut[i*3+1] = (float)(fmax(0.0, -0.9689*X + 1.8758*Y + 0.0415*Z) / reference_y);
+        lut[i*3+2] = (float)(fmax(0.0,  0.0557*X - 0.2040*Y + 1.0570*Z) / reference_y);
     }
     return lut;
 }
 
-// Device-side lookup with linear interpolation over log temperature.
-__device__ __forceinline__ float3 lookup(const float* lut, float T) {
-    float Tc = clampf(T, (float)LUT_TMIN, (float)LUT_TMAX);
-    float f = logf(Tc / (float)LUT_TMIN) / logf((float)LUT_TMAX / (float)LUT_TMIN);
-    float x = f * (LUT_N - 1);
-    int i0 = (int)x; if (i0 < 0) i0 = 0; if (i0 > LUT_N - 2) i0 = LUT_N - 2;
-    float t = x - i0;
-    float3 c0 = make_float3(lut[i0*3+0], lut[i0*3+1], lut[i0*3+2]);
-    float3 c1 = make_float3(lut[(i0+1)*3+0], lut[(i0+1)*3+1], lut[(i0+1)*3+2]);
-    return c0 * (1.0f - t) + c1 * t;
+__host__ __device__ __forceinline__ float3 lookup(const float* lut, float T) {
+    if (!(T >= (float)LUT_TMIN)) return make_float3(0.f, 0.f, 0.f);
+    const float log_span = logf((float)(LUT_TMAX / LUT_TMIN));
+    const float x = logf(fminf(T, (float)LUT_TMAX) / (float)LUT_TMIN) *
+                    ((LUT_N - 1) / log_span);
+    const int i = (int)fminf(x, (float)(LUT_N - 2));
+    float t = x - i;
+    if (T > (float)LUT_TMAX) {
+        // The optical spectrum tends to a straight line in T at high
+        // temperature. Continue with the slope of the final table interval.
+        const float interval = (float)LUT_TMAX * -expm1f(-log_span / (LUT_N - 1));
+        t = 1.f + (T - (float)LUT_TMAX) / interval;
+    }
+    const float3 c0 = make_float3(lut[i*3], lut[i*3+1], lut[i*3+2]);
+    const float3 c1 = make_float3(lut[i*3+3], lut[i*3+4], lut[i*3+5]);
+    return make_float3(c0.x + t * (c1.x - c0.x),
+                       c0.y + t * (c1.y - c0.y),
+                       c0.z + t * (c1.z - c0.z));
 }
 
 } // namespace bb

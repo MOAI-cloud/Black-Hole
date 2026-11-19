@@ -7,13 +7,16 @@
     "node": ">=18.19"
   },
   "scripts": {
-    "renderer:configure": "cmake -S .. -B ../build -DCMAKE_CUDA_ARCHITECTURES=120",
-    "renderer:build": "cmake --build ../build -j",
+    "test:lensing": "node tests/run-lensing.mjs",
+    "start": "node ../play.mjs",
+    "renderer:configure": "cmake -S .. -B ../build",
+    "renderer:build": "cmake --build ../build --config Release --parallel",
     "renderer:rebuild": "npm run renderer:configure && npm run renderer:build",
     "dev": "concurrently -k -n api,web -c cyan,yellow \"npm:api\" \"npm:web\"",
     "api": "node server/render-server.mjs",
     "web": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
+    "test": "node --test server/ tests/",
     "serve": "npm run build && node server/render-server.mjs"
   },
   "dependencies": {
