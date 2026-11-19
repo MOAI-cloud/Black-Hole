@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Gargantua look development</title>
+<style>
+  html, body { margin: 0; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+<canvas aria-label="Fixed-camera look development view"></canvas>
+<script type="module">
+// Fixed-camera view for comparing disk looks without touching the main app.
+// Any numeric or boolean RenderSettings key can be overridden in the query,
+// e.g. ?camTheta=86&diskNoise=.5&time=40&model=kerr&sky=milky-way&quality=high
+import { BlackHoleScene } from '../src/BlackHoleScene';
+import { loadSkyTexture } from '../src/skies';
+import { DEFAULT_SETTINGS } from '../src/types';
+import { findBlackHole } from '../src/blackHoles';
+
+const query = new URLSearchParams(location.search);
+const settings = { ...DEFAULT_SETTINGS };
+const entry = findBlackHole(query.get('object') ?? '');
+if (entry) Object.assign(settings, entry.base, entry.views[Number(query.get('view') ?? 0)].settings);
+for (const [key, value] of query) {
+  if (!(key in settings)) continue;
+  const current = settings[key];
+  settings[key] = typeof current === 'number' ? Number(value) : typeof current === 'boolean' ? value === '1' || value === 'true' : value;
+}
+const scene = new BlackHoleScene(document.querySelector('canvas'), settings, () => {});
+scene.setLensingModel(query.get('model') === 'schwarzschild' ? 'schwarzschild' : 'kerr');
+scene.setQuality(query.get('quality') ?? 'high');
+scene.setObserverTime(Number(query.get('time') ?? (entry ? 0 : 40)));
+scene.setPaused(query.get('play') !== '1');
+scene.setStarTexture(await loadSkyTexture(query.get('sky') ?? settings.background));
+await scene.whenFrameReady();
+window.lookdev = { scene, settings };
+document.title = 'ready';
+</script>

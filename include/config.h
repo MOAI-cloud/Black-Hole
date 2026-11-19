@@ -1,54 +1,89 @@
 #pragma once
+
 // ============================================================================
-//  Render configuration shared between host and device.
+//  Render configuration shared between host and device-facing code.
 // ============================================================================
+
+enum DiskModel : int {
+    DISK_MODEL_LEGACY = 0,
+    DISK_MODEL_NOVIKOV_THORNE = 1,
+};
 
 struct RenderConfig {
     // --- Image ---
-    int    width        = 1280;     // output width  in pixels
-    int    height       = 720;      // output height in pixels
-    int    spp          = 4;        // samples per pixel (anti-aliasing)
+    int    width        = 1920;
+    int    height       = 1080;
+    int    spp          = 4;
 
     // --- Black hole (geometric units: G = c = M = 1) ---
-    double spin         = 0.9;      // a/M, Kerr spin parameter in [0, 1)
+    double spin         = 0.5;      // a/M in [0,1)
 
     // --- Camera ---
-    double cam_r        = 60.0;     // camera radius in units of M
-    double cam_theta    = 84.0;     // camera polar angle in degrees (90 = equatorial)
-    double cam_phi      = 0.0;      // camera azimuth in degrees
-    double fov          = 45.0;     // horizontal field of view in degrees
-    double yaw          = 0.0;      // extra look yaw (deg), 0 = aim at centre
-    double pitch        = 0.0;      // extra look pitch (deg)
+    double cam_r        = 62.0;
+    double cam_theta    = 83.2;     // degrees, 90 = equatorial
+    double cam_phi      = 115.0;      // degrees
+    double fov          = 47.810610;     // horizontal FOV in degrees
+    double yaw          = 0.0;
+    double pitch        = 0.0;
+    double roll         = -2.0;      // rotate the camera's right/up basis about its viewing axis, degrees
+    double observer_time = 0.0;     // Boyer-Lindquist camera event time (M)
+    double shutter       = 0.0;     // full rectangular exposure in coordinate time (M)
+    double frame_dt      = 1.0;     // coordinate time between animation frames (M)
 
-    // --- Accretion disk (thin, equatorial) ---
+    // --- Accretion disk ---
     int    disk_enabled = 1;
-    double disk_inner   = -1.0;     // inner radius (M); <0 => use ISCO
-    double disk_outer   = 22.0;     // outer radius (M)
-    double disk_temp    = 9000.0;   // characteristic temperature at inner edge (K)
-    double disk_brightness = 12.0;  // emission scale multiplier
-    int    doppler      = 1;        // 1 = apply Doppler + gravitational shift
-    double disk_noise   = 0.45;     // 0..1 turbulence strength on brightness
+    double disk_inner   = -1.0;     // < 0 => prograde ISCO
+    double disk_outer   = 26.0;
+    double disk_temp    = 5600.0;   // peak effective temperature for NT model
+    double disk_brightness = 4.0;
+    double disk_noise   = 0.5;      // turbulent contrast: log-normal heating width 0.5 * disk_noise (plus the recorded flow)
+    int    disk_model   = DISK_MODEL_NOVIKOV_THORNE;
 
-    // --- Volumetric (thick) disk ---
-    int    disk_volumetric = 1;     // 1 = emission/absorption volume integration
-    double disk_thickness  = 0.5;   // vertical scale height (M) at inner edge
-    double disk_flare      = 0.05;  // scale-height growth per unit radius (flaring)
-    double disk_absorption = 0.4;   // opacity coefficient (optical depth scale)
+    // Frequency-shift controls.  Keeping them separate makes the semantics
+    // explicit: the kinematic term is the gas motion relative to a ZAMO, while
+    // the gravitational term is the ZAMO-to-observer shift.
+    int    kinematic_doppler     = 1;
+    int    gravitational_redshift = 1;
+
+    // Evolve the simulated pressure field and its subgrid material and
+    // account for light-travel time.  Disable for a deliberately frozen texture.
+    int    disk_advect = 1;
+
+    // --- Emitting geometry ---
+    int    disk_volumetric = 0;
+    bool   disk_photosphere = true;
+    double disk_thickness  = 0.35;
+    double disk_flare      = 0.035;
+    double disk_absorption = 0.4;
 
     // --- Background ---
-    const char* starmap = nullptr;  // equirect HDR/PPM star map file (black if unset)
-    double sky_brightness = 1.0;    // multiplier applied to the background map
+    const char* starmap = nullptr;
+    double sky_brightness = 1.0;
 
+    // A binary companion star at infinity on the celestial sphere: direction
+    // (polar angle and azimuth, degrees), angular radius (degrees), T_eff (K).
+    int    companion = 0;
+    double companion_theta = 90.0;
+    double companion_phi = 0.0;
+    double companion_radius = 1.0;
+    double companion_temp = 5800.0;
+    // Disk colour correction f: a diluted blackbody f^-4 B(f T_eff), so a
+    // star of equal colour temperature is f^4 brighter per unit area.
+    double disk_color_correction = 1.0;
 
     // --- Integration ---
-    double tolerance    = 1e-7;     // adaptive RKF45 relative tolerance
-    double max_step     = 2.0;      // max affine step
-    int    max_iter     = 200000;   // safety cap on integration steps
+    // RK error is controlled with atol + rtol * scale.
+    double tolerance     = 1e-7;    // relative tolerance (rtol)
+    double abs_tolerance = 1e-10;   // absolute tolerance (atol)
+    double min_step      = 1e-7;
+    double max_step      = 2.0;
+    int    max_iter      = 200000;
 
     // --- Post processing ---
-    double exposure     = 1.0;      // linear exposure before tonemap
+    double exposure     = 1.0;
+    bool   cinematic    = false;    // add optical halation and film shoulder to PNG
 
     // --- Output ---
     const char* output  = "gargantua.png";
-    const char* hdr_output = nullptr;   // optional Radiance .hdr (linear HDR) file
+    const char* hdr_output = nullptr;
 };

@@ -1,0 +1,19 @@
+/* Binary-merger scenario. Uses the app's palette variables from styles.css. */
+.merger-plot-canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+
+.merger-panel .merger-note { margin-top: 8px; color: var(--muted, #a3a7a8); font-size: 11.5px; line-height: 1.5; }
+.merger-panel .merger-note strong { color: var(--ink, #f0f0ed); font-weight: 600; }
+.merger-panel .merger-note a { color: var(--amber, #ffad69); }
+.merger-panel .control-stack { margin-top: 12px; }
+.merger-panel .merger-actions { display: flex; gap: 8px; margin-top: 14px; }
+.merger-panel .merger-actions button { flex: 1; min-height: 31px; font-size: 11.5px; }
+.merger-panel .merger-status { margin-top: 10px; color: #adb4b0; font: 10px/1.55 var(--mono, monospace); }
+
+.merger-results { display: grid; gap: 1px; font-size: 11.5px; }
+.merger-results div { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-bottom: 1px solid #ffffff0d; }
+.merger-results dt { color: var(--muted, #a3a7a8); }
+.merger-results dd { margin: 0; font: 11px var(--mono, monospace); color: var(--ink, #f0f0ed); text-align: right; white-space: nowrap; }
+
+.merger-readouts { display: flex; flex-wrap: wrap; gap: 8px clamp(14px, 2.2vw, 30px); margin: 0; text-shadow: 0 1px 8px #000; }
+.merger-readouts dt { font: 9px var(--mono, monospace); text-transform: uppercase; letter-spacing: .1em; color: #cbcdca; }
+.merger-readouts dd { margin: 4px 0 0; font: 14px/1.1 var(--mono, monospace); letter-spacing: -.03em; color: var(--ink, #f0f0ed); white-space: nowrap; }

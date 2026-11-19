@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Gargantua scenario harness</title>
+<style>
+  html, body { margin: 0; background: #000; color: #ddd; font: 12px monospace; }
+  #view { position: relative; width: 100vw; height: 62vh; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #readouts { position: absolute; left: 12px; bottom: 12px; }
+  #plots { position: relative; height: 30vh; }
+  #controls { display: none; }
+</style>
+<div id="view"><canvas aria-label="Scenario harness viewport"></canvas><img id="frame" alt="" style="position:absolute;inset:0;width:100%;height:100%"><div id="readouts" class="scenario-readouts"></div></div>
+<div id="plots" class="scenario-plots"></div>
+<div id="controls"></div>
+<script type="module">
+// Draw-on-demand scenario harness: works in a hidden browser pane, where the
+// app's animation loop is throttled. ?id=infall&time=40&camR=...
+import '../src/styles.css';
+import { BlackHoleScene } from '../src/BlackHoleScene';
+import { loadSkyTexture } from '../src/skies';
+import { DEFAULT_SETTINGS } from '../src/types';
+import { SCENARIOS } from '../src/scenarios/registry';
+
+const query = new URLSearchParams(location.search);
+const settings = { ...DEFAULT_SETTINGS };
+const scene = new BlackHoleScene(document.querySelector('canvas'), settings, () => {});
+scene.setLensingModel('kerr');
+scene.setQuality('high');
+scene.setPaused(true);
+scene.setStarTexture(await loadSkyTexture(settings.background));
+await scene.whenFrameReady();
+let paused = true;
+const context = {
+  renderer: scene.getRenderer(),
+  kerr: {
+    createMaterial: (defines, uniforms) => scene.createKerrMaterial(defines, uniforms),
+    settings: () => settings,
+    updateSettings: (patch, camera = false) => { Object.assign(settings, patch); scene.setSettings(settings, { syncCamera: camera }); }
+  },
+  packedRadiance: scene.packedRadiance,
+  controls: document.getElementById('controls'),
+  plots: document.getElementById('plots'),
+  readouts: document.getElementById('readouts'),
+  getTime: () => scene.getObserverTime(),
+  setTime: time => scene.setObserverTime(time),
+  setPaused: value => { paused = value; scene.setPaused(value); },
+  isPaused: () => paused,
+  requestRedraw: () => scene.requestRedraw()
+};
+const entry = SCENARIOS.find(item => item.id === (query.get('id') ?? 'infall'));
+const scenario = await entry.create(context);
+Object.assign(settings, scenario.camera);
+for (const key of ['camR', 'camTheta', 'camPhi', 'fov', 'roll']) if (query.has(key)) settings[key] = Number(query.get(key));
+scene.setSettings(settings, { syncCamera: true });
+scene.setProgram(scenario.program);
+async function show(time) {
+  scene.setObserverTime(time);
+  scenario.frame(time);
+  const blob = await scene.capture();
+  const image = document.getElementById('frame');
+  if (image.src) URL.revokeObjectURL(image.src);
+  image.src = URL.createObjectURL(blob);
+  return blob;
+}
+await show(Number(query.get('time') ?? 30));
+window.harness = { scene, scenario, settings, show };
+document.title = 'ready';
+</script>

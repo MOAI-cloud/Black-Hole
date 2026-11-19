@@ -1,352 +1,562 @@
 import * as THREE from 'three';
+import flowUrl from '../../src/flow/accretion.bin?url';
+import { CameraOptics } from './cameraOptics';
+import { TelescopeBeam } from './telescopeBeam';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { createDiskTexture } from './diskTexture';
+import { blackbodyColor, createBlackbodyTable, createFallbackSky } from './emissionTextures';
+import { kerrRadii } from './geometry';
+import { circularOrbit, gravitationalRadius } from './astro';
+import { vertexShader, fragmentShader } from './lensingShader';
+import { kerrFragmentShader } from './kerrShader';
+import { createDiskBounds, createFluxTable, createObserverTable, createOrbitTable, updateObserverTable } from './orbitTables';
 import type { RenderSettings } from './types';
+import type { ViewportProgram } from './scenarios/types';
 
-type CameraChangeHandler = (camera: Pick<RenderSettings, 'camR' | 'camTheta' | 'camPhi' | 'fov'>) => void;
+type CameraValues = Pick<RenderSettings, 'camR' | 'camTheta' | 'camPhi' | 'fov'>;
+export type PreviewQuality = 'auto' | 'high' | 'performance';
+export type LensingModel = 'schwarzschild' | 'kerr';
+export type FrameStats = { fps: number; scale: number };
 
-const degreesToRadians = Math.PI / 180;
-const radiansToDegrees = 180 / Math.PI;
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(maximum, Math.max(minimum, value));
-}
-
-function disposeObject(object: THREE.Object3D): void {
-  object.traverse((child) => {
-    const mesh = child as THREE.Mesh;
-    if (mesh.geometry) {
-      mesh.geometry.dispose();
-    }
-    const material = mesh.material;
-    if (Array.isArray(material)) {
-      material.forEach((entry) => entry.dispose());
-    } else if (material) {
-      material.dispose();
-    }
-  });
-}
-
-function kerrHorizonRadius(spin: number): number {
-  return 1 + Math.sqrt(Math.max(0, 1 - spin * spin));
-}
-
-function progradeIscoRadius(spin: number): number {
-  const safeSpin = clamp(spin, 0, 0.999);
-  const z1 = 1 + Math.cbrt(1 - safeSpin * safeSpin)
-    * (Math.cbrt(1 + safeSpin) + Math.cbrt(1 - safeSpin));
-  const z2 = Math.sqrt(3 * safeSpin * safeSpin + z1 * z1);
-  return 3 + z2 - Math.sqrt((3 - z1) * (3 + z1 + 2 * z2));
-}
-
-function createFallbackStarTexture(): THREE.CanvasTexture {
-  const width = 2048;
-  const height = 1024;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d');
-  if (!context) {
-    throw new Error('Canvas 2D context unavailable');
-  }
-
-  const gradient = context.createLinearGradient(0, 0, width, height);
-  gradient.addColorStop(0, '#05070d');
-  gradient.addColorStop(0.5, '#101826');
-  gradient.addColorStop(1, '#070609');
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, width, height);
-
-  for (let starIndex = 0; starIndex < 3400; starIndex += 1) {
-    const longitude = Math.random() * width;
-    const latitudeBand = Math.pow(Math.random(), 1.8);
-    const latitude = height * (0.5 + (Math.random() - 0.5) * latitudeBand);
-    const radius = Math.random() < 0.985 ? Math.random() * 1.1 : Math.random() * 2.8 + 1.0;
-    const alpha = Math.random() * 0.8 + 0.2;
-    context.fillStyle = `rgba(235, 244, 255, ${alpha})`;
-    context.beginPath();
-    context.arc(longitude, latitude, radius, 0, Math.PI * 2);
-    context.fill();
-  }
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.wrapS = THREE.RepeatWrapping;
-  texture.wrapT = THREE.ClampToEdgeWrapping;
-  texture.minFilter = THREE.LinearFilter;
-  texture.magFilter = THREE.LinearFilter;
-  return texture;
-}
+const rad = Math.PI / 180;
+const uhdPixels = 3840 * 2160;
 
 export class BlackHoleScene {
-  private readonly canvas: HTMLCanvasElement;
   private readonly renderer: THREE.WebGLRenderer;
+  readonly automaticModel: LensingModel;
+  private readonly initialScale: number;
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(45, 1, 0.05, 900);
+  private readonly optics: CameraOptics;
+  private readonly beam: TelescopeBeam;
+  private readonly camera = new THREE.PerspectiveCamera();
   private readonly controls: OrbitControls;
-  private readonly cameraChangeHandler: CameraChangeHandler;
+  private readonly material: THREE.ShaderMaterial;
+  private readonly screen: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>;
+  private program: ViewportProgram | null = null;
+  private frameListener: ((timeM: number) => void) | null = null;
+  private readonly geometry = new THREE.BufferGeometry();
   private readonly resizeObserver: ResizeObserver;
+  private readonly controller = new AbortController();
+  private readonly orbit = createOrbitTable();
+  private readonly observer = createObserverTable();
+  private readonly blackbody = createBlackbodyTable();
+  private readonly flow = new THREE.Data3DTexture();
+  private readonly flowReady: Promise<void>;
+  private sky: THREE.Texture = createFallbackSky();
+  private bounds: THREE.DataTexture;
+  private flux: THREE.DataTexture;
   private settings: RenderSettings;
-  private blackHoleMesh: THREE.Mesh | null = null;
-  private diskGroup = new THREE.Group();
-  private guideGroup = new THREE.Group();
-  private starSphere: THREE.Mesh;
-  private diskTexture: THREE.Texture | null = null;
+  private observerRadius = 0;
+  private dirty = true;
+  private paused = false;
+  private autoOrbit = false;
+  private timeM = 0;
+  private playbackRate = 12;
+  private quality: PreviewQuality = 'auto';
+  private lensingModel: LensingModel = 'schwarzschild';
+  private adaptiveScale: number;
+  private pixelScale = 1;
+  private maxBufferWidth = 1;
+  private maxBufferHeight = 1;
+  private lastPausedCameraMotion = -Infinity;
+  private pausedCameraMoving = false;
+  private lastFrame = 0;
+  private statsDuration = 0;
+  private statsFrames = 0;
   private syncingCamera = false;
-  private lastDiskSignature = '';
-  private lastFrameMs = 0;
+  private pendingCamera = false;
+  private lastCameraSignal = 0;
+  private disposed = false;
 
-  constructor(canvas: HTMLCanvasElement, initialSettings: RenderSettings, cameraChangeHandler: CameraChangeHandler) {
-    this.canvas = canvas;
-    this.settings = { ...initialSettings };
-    this.cameraChangeHandler = cameraChangeHandler;
-    this.renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: true,
-      powerPreference: 'high-performance'
-    });
-
+  constructor(private readonly canvas: HTMLCanvasElement, initial: RenderSettings,
+    private readonly onCamera: (values: CameraValues) => void,
+    private readonly onStats?: (stats: FrameStats) => void,
+    onShaderFailure?: () => void) {
+    this.settings = { ...initial };
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, depth: false,
+      stencil: false, alpha: false, powerPreference: 'high-performance' });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-
-    this.scene.background = new THREE.Color('#020309');
-    this.scene.fog = new THREE.FogExp2('#020309', 0.0045);
+    const gl = this.renderer.getContext();
+    const info = gl.getExtension('WEBGL_debug_renderer_info');
+    const device = String(gl.getParameter(info?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER));
+    const software = /swiftshader|llvmpipe|softpipe|software rasterizer|basic render driver/i.test(device);
+    this.automaticModel = software ? 'schwarzschild' : 'kerr';
+    this.initialScale = software ? .5 : Math.min(1.5, Math.max(1.15, window.devicePixelRatio));
+    this.adaptiveScale = this.initialScale;
+    if (onShaderFailure) {
+      let reported = false;
+      this.renderer.debug.onShaderError = (gl, program, vertex, fragment) => {
+        if (reported) return;
+        reported = true;
+        console.error('Viewport shader failed', gl.getProgramInfoLog(program), gl.getShaderInfoLog(vertex), gl.getShaderInfoLog(fragment));
+        // Leave the renderer's active draw before releasing its resources.
+        queueMicrotask(onShaderFailure);
+      };
+    }
+    this.readBufferLimits();
+    this.optics = new CameraOptics(this.renderer, this.geometry);
+    this.beam = new TelescopeBeam(this.renderer, this.geometry);
+    const inner = kerrRadii(initial.spin).isco;
+    this.bounds = createDiskBounds(this.orbit, inner, initial.diskOuter);
+    this.flux = createFluxTable(initial.spin, initial.diskOuter, initial.diskModel);
+    this.flowReady = this.loadFlow();
+    // Startup reports asset errors through whenFrameReady, including when
+    // shader compilation takes longer than the asset request.
+    void this.flowReady.catch(() => {});
+    this.material = new THREE.ShaderMaterial({
+      vertexShader, fragmentShader, depthTest: false, depthWrite: false,
+      defines: this.optics.packed ? { PACK_RADIANCE: 1 } : {},
+      uniforms: {
+        flowMap: { value: this.flow }, orbitMap: { value: this.orbit }, observerMap: { value: this.observer },
+        fluxMap: { value: this.flux }, boundsMap: { value: this.bounds },
+        colorMap: { value: this.blackbody }, skyMap: { value: this.sky },
+        cameraAxes: { value: new THREE.Matrix3() }, timeM: { value: 0 }, radius: { value: initial.camR },
+        aspect: { value: 1 }, bufferHeight: { value: 1 }, tanHalfFov: { value: 1 }, cameraRoll: { value: new THREE.Vector2(1, 0) },
+        spin: { value: 0 }, innerR: { value: inner },
+        outerR: { value: 0 }, diskHeight: { value: 0 }, flare: { value: 0 }, absorption: { value: 0 },
+        peakTemp: { value: 0 }, brightness: { value: 0 }, turbulence: { value: 0 }, skyBrightness: { value: 0 },
+        opticalPass: { value: false }, exposure: { value: 1 }, thin: { value: false }, photosphere: { value: false }, kinematic: { value: true },
+        gravity: { value: true }, staticPattern: { value: false }, diskEnabled: { value: true },
+        companion: { value: new THREE.Vector4(0, 0, 1, 2) }, companionRadiance: { value: new THREE.Vector3() },
+        riafDensity: { value: 1e6 }, riafTemperature: { value: 4e10 }, riafBeta: { value: 10 }, riafHeight: { value: .5 },
+        riafSlopes: { value: new THREE.Vector2(1.1, .84) },
+        gravitationalCm: { value: 1 }, observeHz: { value: 2.3e11 }, iscoEnergy: { value: 1 }, iscoMomentum: { value: 0 },
+        hotspot: { value: new THREE.Vector4(9, .7, 0, 0) }, jetDensity: { value: 0 }, jetLorentz: { value: 3 },
+        rawBrightness: { value: false }, displayDecades: { value: 0 }
+      }
+    });
+    // One full-screen triangle, independent of zoom and of the number of disk images.
+    this.geometry.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
+    this.screen = new THREE.Mesh(this.geometry, this.material);
+    this.screen.frustumCulled = false;
+    this.scene.add(this.screen);
 
     this.controls = new OrbitControls(this.camera, canvas);
+    this.controls.enablePan = false;
     this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.065;
-    this.controls.rotateSpeed = 0.62;
-    this.controls.zoomSpeed = 0.7;
+    this.controls.dampingFactor = .085;
+    this.controls.rotateSpeed = .55;
+    this.controls.zoomSpeed = .75;
+    this.controls.autoRotateSpeed = .45;
     this.controls.minDistance = 4;
-    this.controls.maxDistance = 220;
-    this.controls.target.set(0, 0, 0);
-    this.controls.addEventListener('change', () => this.emitCameraChange());
-
-    this.scene.add(new THREE.AmbientLight('#bfd7ff', 0.22));
-    const diskLight = new THREE.PointLight('#ffb55f', 4.5, 100, 1.8);
-    diskLight.position.set(0, 1.5, 0);
-    this.scene.add(diskLight);
-
-    this.starSphere = this.createStarSphere(createFallbackStarTexture());
-    this.scene.add(this.starSphere);
-    this.scene.add(this.diskGroup);
-    this.scene.add(this.guideGroup);
-
+    this.controls.maxDistance = 1000;
+    this.controls.minPolarAngle = rad;
+    this.controls.maxPolarAngle = 179 * rad;
+    this.controls.addEventListener('change', () => {
+      this.dirty = true;
+      if (!this.syncingCamera) this.pendingCamera = true;
+      if (this.paused && !this.syncingCamera && this.quality === 'auto') {
+        this.lastPausedCameraMotion = performance.now();
+        if (!this.pausedCameraMoving) {
+          this.pausedCameraMoving = true;
+          this.resize();
+        }
+      }
+    });
+    if (!canvas.hasAttribute('tabindex')) canvas.tabIndex = 0;
+    const events = { signal: this.controller.signal };
+    canvas.addEventListener('pointerdown', () => canvas.focus({ preventScroll: true }), events);
+    canvas.addEventListener('keydown', event => this.keyNavigation(event), events);
+    canvas.addEventListener('webglcontextrestored', () => {
+      this.readBufferLimits();
+      this.resize();
+    }, events);
+    document.addEventListener('visibilitychange', () => {
+      this.lastFrame = 0;
+      this.statsDuration = this.statsFrames = 0;
+      this.dirty = true;
+      this.renderer.setAnimationLoop(document.hidden ? null : this.frame);
+    }, events);
     this.resizeObserver = new ResizeObserver(() => this.resize());
-    this.resizeObserver.observe(canvas.parentElement ?? canvas);
-
-    this.rebuildGuides();
-    this.rebuildBlackHole();
-    this.rebuildDisk(true);
-    this.syncCameraFromSettings();
+    this.resizeObserver.observe(canvas);
+    this.setSettings(initial, { syncCamera: true });
     this.resize();
-    this.renderer.setAnimationLoop((timeMs) => this.render(timeMs));
+    this.renderer.setAnimationLoop(this.frame);
   }
 
-  setSettings(settings: RenderSettings, options: { syncCamera?: boolean } = {}): void {
-    this.settings = { ...settings };
-    this.renderer.toneMappingExposure = clamp(settings.exposure, 0.05, 10);
-    this.rebuildBlackHole();
-    this.rebuildDisk(false);
-    if (options.syncCamera) {
-      this.syncCameraFromSettings();
+  setSettings(next: RenderSettings, options: { syncCamera?: boolean } = {}): void {
+    const old = this.settings;
+    const inner = kerrRadii(next.spin).isco;
+    const radialChange = next.spin !== old.spin || next.diskOuter !== old.diskOuter;
+    if (radialChange) {
+      this.bounds.dispose();
+      this.bounds = createDiskBounds(this.orbit, inner, next.diskOuter);
+      this.material.uniforms.boundsMap.value = this.bounds;
     }
+    if (radialChange || next.diskModel !== old.diskModel) {
+      this.flux.dispose();
+      this.flux = createFluxTable(next.spin, next.diskOuter, next.diskModel);
+      this.material.uniforms.fluxMap.value = this.flux;
+    }
+    const modelChange = (next.emission === 'synchrotron') !== (old.emission === 'synchrotron');
+    this.settings = { ...next };
+    if (modelChange) this.applyFragmentShader();
+    const uniforms = this.material.uniforms;
+    uniforms.tanHalfFov.value = Math.tan(next.fov * rad * .5);
+    uniforms.cameraRoll.value.set(Math.cos(next.roll * rad), Math.sin(next.roll * rad));
+    uniforms.spin.value = next.spin;
+    uniforms.innerR.value = inner;
+    uniforms.outerR.value = next.diskOuter;
+    uniforms.diskHeight.value = Math.max(.001, next.diskThick);
+    uniforms.flare.value = next.diskFlare;
+    uniforms.absorption.value = next.diskAbsorb;
+    uniforms.peakTemp.value = next.diskTemp;
+    uniforms.brightness.value = next.diskBright;
+    uniforms.turbulence.value = next.diskNoise;
+    uniforms.skyBrightness.value = next.skyBright;
+    uniforms.exposure.value = next.exposure;
+    uniforms.opticalPass.value = next.cinematic;
+    uniforms.thin.value = next.thin;
+    uniforms.photosphere.value = next.thin && next.photosphere;
+    uniforms.kinematic.value = !next.noDoppler;
+    uniforms.gravity.value = !next.noRedshift;
+    uniforms.staticPattern.value = next.staticDiskPattern;
+    uniforms.diskEnabled.value = next.diskEnabled;
+    this.updateCompanion(next);
+    this.updateSynchrotron(next, inner);
+    this.dirty = true;
+    if (options.syncCamera) this.positionCamera(next);
+  }
+
+  private updateCompanion(next: RenderSettings): void {
+    const uniforms = this.material.uniforms;
+    if (!next.companion) {
+      uniforms.companion.value.set(0, 0, 1, 2);
+      return;
+    }
+    const theta = next.companionTheta * rad, phi = next.companionPhi * rad;
+    uniforms.companion.value.set(Math.sin(theta) * Math.cos(phi), Math.cos(theta), -Math.sin(theta) * Math.sin(phi),
+      Math.cos(Math.max(1e-4, next.companionRadius) * rad));
+    // Same Planck/CIE normalization as the disk: radiance relative to the
+    // reference (peak) temperature, scaled by the emission setting.
+    const star = blackbodyColor(next.companionTemp);
+    // A colour-corrected disk is a diluted blackbody, f⁻⁴ B(f T_eff), so a
+    // star of the same colour temperature is f⁴ brighter per unit area.
+    const scale = next.diskBright * next.diskColorCorrection ** 4 * 2 ** (star.log2Y - blackbodyColor(next.diskTemp).log2Y);
+    uniforms.companionRadiance.value.set(star.rgb[0] * scale, star.rgb[1] * scale, star.rgb[2] * scale);
+  }
+
+  private updateSynchrotron(next: RenderSettings, isco: number): void {
+    const synchrotron = next.emission === 'synchrotron';
+    const defines = this.material.defines as Record<string, unknown>;
+    if (synchrotron !== ('SYNCHROTRON' in defines)) {
+      if (synchrotron) defines.SYNCHROTRON = 1;
+      else delete defines.SYNCHROTRON;
+      this.applyFragmentShader();
+    }
+    if (!synchrotron) return;
+    const uniforms = this.material.uniforms;
+    const orbit = circularOrbit(isco, next.spin);
+    uniforms.riafDensity.value = next.riafDensity;
+    uniforms.riafTemperature.value = next.riafTemperature;
+    uniforms.riafBeta.value = next.riafBeta;
+    uniforms.riafHeight.value = next.riafHeight;
+    uniforms.riafSlopes.value.set(next.riafDensitySlope, next.riafTemperatureSlope);
+    uniforms.gravitationalCm.value = gravitationalRadius(next.massSolar) * 100;
+    uniforms.observeHz.value = next.observeGHz * 1e9;
+    uniforms.iscoEnergy.value = orbit.E;
+    uniforms.iscoMomentum.value = orbit.L;
+    uniforms.hotspot.value.set(next.hotspotRadius, .7, next.hotspot ? 6 : 0, .3);
+    uniforms.jetDensity.value = next.jet ? .6 : 0;
+    uniforms.displayDecades.value = next.displayDecades;
+  }
+
+  /** The synchrotron flow needs volumetric geodesic transfer, so it always uses Kerr. */
+  private effectiveModel(): LensingModel {
+    return this.settings.emission === 'synchrotron' ? 'kerr' : this.lensingModel;
+  }
+
+  private applyFragmentShader(): void {
+    const shader = this.effectiveModel() === 'kerr' ? kerrFragmentShader : fragmentShader;
+    if (this.material.fragmentShader !== shader) this.material.fragmentShader = shader;
+    this.material.needsUpdate = true;
+  }
+
+  private positionCamera(values: CameraValues): void {
+    this.syncingCamera = true;
+    // Drain pending drag damping before applying an absolute preset or slider.
+    const rotate = this.controls.autoRotate;
+    this.controls.autoRotate = false;
+    this.controls.enableDamping = false;
+    this.controls.update();
+    this.controls.enableDamping = true;
+    const theta = THREE.MathUtils.clamp(values.camTheta, 1, 179) * rad;
+    const phi = values.camPhi * rad;
+    const r = THREE.MathUtils.clamp(values.camR, 4, 1000);
+    this.camera.position.set(r * Math.sin(theta) * Math.cos(phi), r * Math.cos(theta), -r * Math.sin(theta) * Math.sin(phi));
+    this.camera.fov = values.fov;
+    this.controls.update();
+    this.controls.autoRotate = rotate;
+    this.pendingCamera = false;
+    this.syncingCamera = false;
+    this.dirty = true;
+  }
+
+  private cameraValues(): CameraValues {
+    const { x, y, z } = this.camera.position;
+    const r = this.camera.position.length();
+    return { camR: r, camTheta: Math.acos(THREE.MathUtils.clamp(y / r, -1, 1)) / rad,
+      camPhi: (Math.atan2(-z, x) / rad + 360) % 360, fov: this.camera.fov };
+  }
+
+  private keyNavigation(event: KeyboardEvent): void {
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const pose = this.cameraValues();
+    const step = event.shiftKey ? 5 : 1.5;
+    switch (event.key) {
+      case 'ArrowLeft': pose.camPhi -= step; break;
+      case 'ArrowRight': pose.camPhi += step; break;
+      case 'ArrowUp': pose.camTheta -= step; break;
+      case 'ArrowDown': pose.camTheta += step; break;
+      case '+': case '=': pose.camR /= 1.08; break;
+      case '-': case '_': pose.camR *= 1.08; break;
+      default: return;
+    }
+    event.preventDefault();
+    this.positionCamera(pose);
+    this.onCamera(this.cameraValues());
   }
 
   setStarTexture(texture: THREE.Texture): void {
-    const material = this.starSphere.material as THREE.MeshBasicMaterial;
-    const previousTexture = material.map;
-    material.map = texture;
-    material.color.set('#ffffff');
-    material.needsUpdate = true;
-    if (previousTexture) {
-      previousTexture.dispose();
+    if (this.disposed) { texture.dispose(); return; }
+    this.sky.dispose();
+    texture.flipY = true;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    texture.generateMipmaps = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.needsUpdate = true;
+    this.sky = texture;
+    this.material.uniforms.skyMap.value = texture;
+    this.dirty = true;
+  }
+
+  setPaused(paused: boolean): void {
+    const changed = this.paused !== paused;
+    this.paused = paused;
+    this.controls.autoRotate = this.autoOrbit && !paused;
+    if (changed) {
+      this.pausedCameraMoving = false;
+      this.lastFrame = 0;
+      this.statsFrames = this.statsDuration = 0;
+      if (this.quality === 'auto') this.resize();
     }
+    this.dirty = true;
   }
 
-  dispose(): void {
-    this.renderer.setAnimationLoop(null);
-    this.resizeObserver.disconnect();
-    this.controls.dispose();
-    this.scene.traverse((object) => disposeObject(object));
-    this.diskTexture?.dispose();
-    this.renderer.dispose();
+  setPlaybackRate(rateMPerSecond: number): void {
+    if (Number.isFinite(rateMPerSecond) && rateMPerSecond >= 0) this.playbackRate = rateMPerSecond;
   }
 
-  private createStarSphere(texture: THREE.Texture): THREE.Mesh {
-    const geometry = new THREE.SphereGeometry(360, 96, 48);
-    const material = new THREE.MeshBasicMaterial({
-      map: texture,
-      side: THREE.BackSide,
-      color: '#dfe8ff'
+  private async loadFlow(): Promise<void> {
+    const response = await fetch(flowUrl, { signal: this.controller.signal });
+    if (!response.ok) throw new Error('Could not load the accretion flow.');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length !== 128 * 190 * 32 * 2) throw new Error('Incomplete accretion flow movie.');
+    if (this.disposed) return;
+    this.flow.image = { data: bytes, width: 128, height: 190, depth: 32 };
+    this.flow.format = THREE.RGFormat;
+    this.flow.wrapS = THREE.RepeatWrapping;
+    this.flow.minFilter = this.flow.magFilter = THREE.LinearFilter;
+    this.flow.needsUpdate = true;
+    this.dirty = true;
+  }
+
+  async whenFrameReady(): Promise<void> {
+    await Promise.all([this.flowReady, this.renderer.compileAsync(this.scene, this.camera)]);
+    if (this.disposed || this.renderer.getContext().isContextLost()) {
+      throw new Error('The live viewport is unavailable.');
+    }
+    this.draw();
+  }
+
+  getObserverTime(): number { return this.timeM; }
+
+  /** True when scenario materials need the PACK_RADIANCE define. */
+  get packedRadiance(): boolean { return this.optics.packed; }
+
+  getRenderer(): THREE.WebGLRenderer { return this.renderer; }
+
+  /** A Kerr geodesic material that shares this scene's uniforms (and their live values). */
+  createKerrMaterial(defines: Record<string, number>, uniforms: Record<string, THREE.IUniform>): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      vertexShader, fragmentShader: kerrFragmentShader, depthTest: false, depthWrite: false,
+      defines: { ...(this.optics.packed ? { PACK_RADIANCE: 1 } : {}), ...defines },
+      uniforms: { ...this.material.uniforms, ...uniforms }
     });
-    const sphere = new THREE.Mesh(geometry, material);
-    sphere.rotation.y = Math.PI;
-    return sphere;
   }
 
-  private rebuildBlackHole(): void {
-    const horizonRadius = kerrHorizonRadius(this.settings.spin);
-    if (!this.blackHoleMesh) {
-      const geometry = new THREE.SphereGeometry(1, 96, 64);
-      const material = new THREE.MeshBasicMaterial({ color: '#000000' });
-      this.blackHoleMesh = new THREE.Mesh(geometry, material);
-      this.scene.add(this.blackHoleMesh);
-    }
-    this.blackHoleMesh.scale.setScalar(horizonRadius);
+  /** Replace the accretion-disk pass with a scenario program, or restore it with null. */
+  setProgram(program: ViewportProgram | null): void {
+    if (program === this.program) return;
+    this.program = program;
+    this.screen.material = program?.material ?? this.material;
+    this.adaptiveScale = this.initialScale;
+    this.statsFrames = this.statsDuration = 0;
+    this.resize();
   }
 
-  private rebuildDisk(force: boolean): void {
-    const signature = [
-      this.settings.spin.toFixed(3),
-      this.settings.diskOuter.toFixed(2),
-      this.settings.diskTemp.toFixed(0),
-      this.settings.diskBright.toFixed(2),
-      this.settings.diskNoise.toFixed(2),
-      this.settings.diskThick.toFixed(2),
-      this.settings.thin ? 'thin' : 'thick',
-      this.settings.noDoppler ? 'sym' : 'doppler'
-    ].join(':');
-
-    if (!force && signature === this.lastDiskSignature) {
-      return;
-    }
-
-    this.lastDiskSignature = signature;
-    disposeObject(this.diskGroup);
-    this.diskGroup.clear();
-    this.diskTexture?.dispose();
-
-    const innerRadius = clamp(
-      progradeIscoRadius(this.settings.spin),
-      kerrHorizonRadius(this.settings.spin) + 0.08,
-      this.settings.diskOuter - 1
-    );
-    const outerRadius = this.settings.diskOuter;
-    this.diskTexture = createDiskTexture(this.settings);
-
-    const diskGeometry = new THREE.RingGeometry(innerRadius, outerRadius, 288, 2);
-    const diskMaterial = new THREE.MeshBasicMaterial({
-      map: this.diskTexture,
-      transparent: true,
-      opacity: this.settings.thin ? 0.88 : 0.72,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false
-    });
-    const diskMesh = new THREE.Mesh(diskGeometry, diskMaterial);
-    diskMesh.rotation.x = -Math.PI / 2;
-    this.diskGroup.add(diskMesh);
-
-    const photonGeometry = new THREE.TorusGeometry(3, 0.045, 12, 192);
-    const photonMaterial = new THREE.MeshBasicMaterial({
-      color: '#ffd07a',
-      transparent: true,
-      opacity: 0.86,
-      blending: THREE.AdditiveBlending
-    });
-    const photonRing = new THREE.Mesh(photonGeometry, photonMaterial);
-    photonRing.rotation.x = Math.PI / 2;
-    this.diskGroup.add(photonRing);
-
-    if (!this.settings.thin) {
-      const glowGeometry = new THREE.TorusGeometry(
-        (innerRadius + outerRadius) * 0.5,
-        clamp(this.settings.diskThick * 1.35, 0.18, 3.2),
-        18,
-        192
-      );
-      const glowMaterial = new THREE.MeshBasicMaterial({
-        color: this.settings.noDoppler ? '#ffbd73' : '#ff9f4a',
-        transparent: true,
-        opacity: clamp(0.16 + this.settings.diskBright / 90, 0.12, 0.52),
-        blending: THREE.AdditiveBlending,
-        depthWrite: false
-      });
-      const glow = new THREE.Mesh(glowGeometry, glowMaterial);
-      glow.rotation.x = Math.PI / 2;
-      this.diskGroup.add(glow);
-    }
+  /** Called on every animation frame with the observer time, drawn or not. */
+  setFrameListener(listener: ((timeM: number) => void) | null): void {
+    this.frameListener = listener;
   }
 
-  private rebuildGuides(): void {
-    disposeObject(this.guideGroup);
-    this.guideGroup.clear();
+  requestRedraw(): void { this.dirty = true; }
 
-    const guideMaterial = new THREE.LineBasicMaterial({
-      color: '#6fb6c9',
-      transparent: true,
-      opacity: 0.22
-    });
+  isPaused(): boolean { return this.paused; }
 
-    for (const radius of [10, 20, 40, 80]) {
-      const points: THREE.Vector3[] = [];
-      for (let segmentIndex = 0; segmentIndex <= 192; segmentIndex += 1) {
-        const angle = (segmentIndex / 192) * Math.PI * 2;
-        points.push(new THREE.Vector3(Math.cos(angle) * radius, 0, Math.sin(angle) * radius));
-      }
-      const geometry = new THREE.BufferGeometry().setFromPoints(points);
-      this.guideGroup.add(new THREE.Line(geometry, guideMaterial));
-    }
+  setObserverTime(time: number): void {
+    if (!Number.isFinite(time)) return;
+    this.timeM = time;
+    this.dirty = true;
   }
 
-  private syncCameraFromSettings(): void {
-    this.syncingCamera = true;
-    const thetaRadians = this.settings.camTheta * degreesToRadians;
-    const phiRadians = this.settings.camPhi * degreesToRadians;
-    const radius = this.settings.camR;
-    this.camera.position.set(
-      radius * Math.sin(thetaRadians) * Math.cos(phiRadians),
-      radius * Math.cos(thetaRadians),
-      radius * Math.sin(thetaRadians) * Math.sin(phiRadians)
-    );
-    this.camera.fov = this.settings.fov;
-    this.camera.updateProjectionMatrix();
-    this.controls.update();
-    this.syncingCamera = false;
+  setAutoOrbit(enabled: boolean): void {
+    this.autoOrbit = enabled;
+    this.controls.autoRotate = enabled && !this.paused;
   }
 
-  private emitCameraChange(): void {
-    if (this.syncingCamera) {
-      return;
-    }
+  setLensingModel(model: LensingModel): void {
+    if (model === this.lensingModel) return;
+    this.lensingModel = model;
+    this.applyFragmentShader();
+    this.adaptiveScale = this.initialScale;
+    this.statsFrames = this.statsDuration = 0;
+    this.resize();
+  }
 
-    const position = this.camera.position;
-    const radius = clamp(position.length(), 3, 220);
-    const theta = Math.acos(clamp(position.y / radius, -1, 1)) * radiansToDegrees;
-    const phi = ((Math.atan2(position.z, position.x) * radiansToDegrees) + 360) % 360;
-    this.cameraChangeHandler({
-      camR: Number(radius.toFixed(2)),
-      camTheta: Number(theta.toFixed(2)),
-      camPhi: Number(phi.toFixed(2)),
-      fov: Number(this.camera.fov.toFixed(2))
-    });
+  setQuality(quality: PreviewQuality): void {
+    this.quality = quality;
+    this.pausedCameraMoving = false;
+    this.statsFrames = this.statsDuration = 0;
+    this.resize();
+  }
+
+  private readBufferLimits(): void {
+    const gl = this.renderer.getContext();
+    const viewport: Int32Array = gl.getParameter(gl.MAX_VIEWPORT_DIMS);
+    const limit = Math.min(gl.getParameter(gl.MAX_RENDERBUFFER_SIZE), gl.getParameter(gl.MAX_TEXTURE_SIZE));
+    this.maxBufferWidth = Math.min(limit, viewport[0]);
+    this.maxBufferHeight = Math.min(limit, viewport[1]);
   }
 
   private resize(): void {
-    const bounds = this.canvas.getBoundingClientRect();
-    const width = Math.max(1, Math.floor(bounds.width));
-    const height = Math.max(1, Math.floor(bounds.height));
-    this.renderer.setSize(width, height, false);
+    const { width, height } = this.canvas.getBoundingClientRect();
+    if (width < 1 || height < 1) return;
+    const native = Math.min(2, window.devicePixelRatio);
+    const kerr = this.effectiveModel() === 'kerr';
+    // A stationary frame can afford four real rays per CSS pixel. During
+    // animation adaptive quality uses frame time to choose the sampling rate.
+    const supersample = this.quality === 'high' || (this.quality === 'auto' && this.paused && !this.pausedCameraMoving);
+    const scale = supersample ? 2 : this.quality === 'auto' ? this.adaptiveScale : Math.min(.75, native);
+    const budget = supersample ? uhdPixels : this.quality === 'auto'
+      ? (kerr ? 2560 * 1440 : 3200 * 1800) : (kerr ? 320000 : 900000);
+    this.pixelScale = Math.min(scale, Math.sqrt(budget / (width * height)),
+      this.maxBufferWidth / width, this.maxBufferHeight / height);
+    const w = Math.max(1, Math.floor(width * this.pixelScale));
+    const h = Math.max(1, Math.floor(height * this.pixelScale));
+    if (this.canvas.width !== w || this.canvas.height !== h) this.renderer.setDrawingBufferSize(w, h, 1);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    this.material.uniforms.aspect.value = this.camera.aspect;
+    this.material.uniforms.bufferHeight.value = this.canvas.height;
+    this.dirty = true;
   }
 
-  private render(timeMs: number): void {
-    // Delta time keeps rotation speed constant regardless of frame rate, and
-    // avoids the unbounded acceleration of integrating an ever-growing clock.
-    const deltaMs = this.lastFrameMs === 0 ? 0 : Math.min(timeMs - this.lastFrameMs, 100);
-    this.lastFrameMs = timeMs;
-    const twoPi = Math.PI * 2;
+  private draw(): void {
+    const r = this.camera.position.length();
+    if (!this.program && this.effectiveModel() === 'schwarzschild' && Math.abs(this.observerRadius - r) > .001) {
+      updateObserverTable(this.observer, r);
+      this.observerRadius = r;
+    }
+    this.camera.updateMatrixWorld();
+    const uniforms = this.screen.material.uniforms;
+    this.material.uniforms.cameraAxes.value.setFromMatrix4(this.camera.matrixWorld);
+    this.material.uniforms.radius.value = r;
+    this.material.uniforms.timeM.value = this.timeM;
+    if (this.program) {
+      const shared = this.material.uniforms;
+      for (const key of ['cameraAxes', 'radius', 'timeM', 'aspect', 'bufferHeight', 'tanHalfFov', 'cameraRoll',
+        'exposure', 'opticalPass', 'skyMap', 'skyBrightness']) {
+        if (!uniforms[key]) continue;
+        const value = shared[key].value;
+        if (value instanceof THREE.Matrix3 || value instanceof THREE.Vector2) uniforms[key].value.copy(value);
+        else uniforms[key].value = value;
+      }
+      this.program.update(this.timeM);
+    }
+    // The synchrotron image is a false-colour map of brightness temperature, not radiance.
+    const synchrotron = !this.program && this.settings.emission === 'synchrotron';
+    const optics = this.settings.cinematic && !synchrotron;
+    const beamPixels = synchrotron ? this.beamSigmaPixels(r) : 0;
+    this.material.uniforms.rawBrightness.value = beamPixels > 0;
+    if (beamPixels > 0) this.beam.draw(this.scene, this.camera, this.canvas.width, this.canvas.height, beamPixels);
+    else if (optics) this.optics.draw(this.scene, this.camera, this.canvas.width, this.canvas.height);
+    else this.renderer.render(this.scene, this.camera);
+    this.dirty = false;
+  }
 
-    this.controls.update();
-    // Disk angular velocity (rad/ms) grows mildly with spin; wrapped to stay
-    // within [0, 2pi) so the float never loses precision over long sessions.
-    const diskOmega = 0.00004 * (1 + this.settings.spin * 2);
-    this.diskGroup.rotation.y = (this.diskGroup.rotation.y + diskOmega * deltaMs) % twoPi;
-    this.starSphere.rotation.y = (this.starSphere.rotation.y + 0.000001 * deltaMs) % twoPi;
-    this.renderer.render(this.scene, this.camera);
+  /** Gaussian σ of the telescope beam in drawing-buffer pixels at camera radius r. */
+  private beamSigmaPixels(r: number): number {
+    const { telescopeBeam, angularScale, fov } = this.settings;
+    if (!(telescopeBeam > 0 && angularScale > 0)) return 0;
+    // One M at the hole subtends 1/r rad from the camera.
+    const pixelsPerM = this.canvas.height / (2 * r * Math.tan(fov * rad / 2));
+    return telescopeBeam / angularScale / 2.3548 * pixelsPerM;
+  }
+
+  async capture(): Promise<Blob> {
+    await this.flowReady;
+    this.draw();
+    return new Promise((resolve, reject) => this.canvas.toBlob(blob =>
+      blob ? resolve(blob) : reject(new Error('Could not capture the viewport')), 'image/png'));
+  }
+
+  private readonly frame = (now: number): void => {
+    const dt = this.lastFrame ? Math.max(0, (now - this.lastFrame) / 1000) : 0;
+    this.lastFrame = now;
+    const motionDt = Math.min(dt, .1);
+    if (!this.paused) this.timeM += dt * this.playbackRate;
+    this.controls.update(motionDt);
+    if (this.pausedCameraMoving && now - this.lastPausedCameraMotion > 200) {
+      this.pausedCameraMoving = false;
+      this.resize();
+    }
+    if (this.pendingCamera && now - this.lastCameraSignal > 65) {
+      this.pendingCamera = false;
+      this.lastCameraSignal = now;
+      this.onCamera(this.cameraValues());
+    }
+    this.frameListener?.(this.timeM);
+    if (!this.dirty && (this.paused || (!this.program && this.settings.staticDiskPattern))) return;
+    this.draw();
+    if (dt === 0 || this.paused) return;
+    this.statsFrames++;
+    this.statsDuration += dt;
+    if (this.statsDuration >= 1.25) {
+      const fps = this.statsFrames / this.statsDuration;
+      this.onStats?.({ fps, scale: this.pixelScale });
+      if (this.quality === 'auto') {
+        const previous = this.adaptiveScale;
+        if (fps < 40) this.adaptiveScale = Math.max(.5, this.pixelScale * .84);
+        else if (fps > 54) this.adaptiveScale = Math.min(Math.max(1.5, Math.min(2, window.devicePixelRatio)), this.pixelScale * 1.10);
+        if (Math.abs(previous - this.adaptiveScale) > .015) this.resize();
+      }
+      this.statsDuration = this.statsFrames = 0;
+    }
+  };
+
+  dispose(): void {
+    this.disposed = true;
+    this.renderer.setAnimationLoop(null);
+    this.controller.abort();
+    this.resizeObserver.disconnect();
+    this.controls.dispose();
+    for (const texture of [this.flow, this.sky, this.orbit, this.flux, this.bounds, this.observer, this.blackbody]) texture.dispose();
+    this.geometry.dispose();
+    this.optics.dispose();
+    this.beam.dispose();
+    this.material.dispose();
+    this.renderer.dispose();
   }
 }
